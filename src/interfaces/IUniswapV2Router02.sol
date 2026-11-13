@@ -25,9 +25,6 @@ interface IUniswapV2Router02 {
         uint256 deadline
     ) external returns (uint256[] memory amounts);
 
-    /// @dev Used to read the pair's real output for a given swap size. The Hub sizes the swap from the
-    ///      configured fee model but never predicts the output itself: the router is the only authority on
-    ///      that, so the quote and the write agree to the wei.
     function getAmountsOut(uint256 amountIn, address[] calldata path)
         external
         view

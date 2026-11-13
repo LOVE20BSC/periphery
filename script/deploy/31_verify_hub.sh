@@ -33,7 +33,7 @@ if [ ! -f "$VERIFIER_PARAMS" ]; then
 fi
 
 params_unset_all "$NETWORK_DIR/network.params" "$VERIFIER_PARAMS" \
-    "$NETWORK_DIR/addresses.core.params" "$NETWORK_DIR/addresses.hub.params"
+    "$NETWORK_DIR/addresses.core.params" "$NETWORK_DIR/hub.params" "$NETWORK_DIR/addresses.hub.params"
 
 params_load "$NETWORK_DIR/network.params"
 params_load "$VERIFIER_PARAMS"

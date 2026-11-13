@@ -23,8 +23,6 @@ import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
 import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router02.sol";
 import {IWrappedNative} from "./interfaces/IWrappedNative.sol";
 
-/// @dev One call's snapshot of the pair it trades against. `balanceABefore` / `balanceBBefore` are the Hub's
-///      own balances at entry, so every prepared / remaining amount is a plain balance delta.
 struct HubPair {
     address tokenA;
     address tokenB;
@@ -36,9 +34,6 @@ struct HubPair {
     uint256 reserveB;
 }
 
-/// @dev The four amounts one call reports. Computed once per call and read by the minimum check, by the
-///      refund and by the event, which keeps the entry points inside the stack limit under the standard
-///      optimizer without a second copy of the arithmetic.
 struct HubAmounts {
     uint256 preparedAmountA;
     uint256 preparedAmountB;
@@ -46,7 +41,6 @@ struct HubAmounts {
     uint256 remainingAmountB;
 }
 
-/// @dev Staking entry: a community token and its parent, both sides resolved from the registry.
 struct StakeContext {
     address tokenAddress;
     address parentTokenAddress;
@@ -84,16 +78,16 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
     constructor(address stakeAddress) {
         uint256 swapFeeForLpRatio = IStake(stakeAddress).SWAP_FEE_FOR_LP_RATIO();
         uint256 swapFeeForProtocolRatio = IStake(stakeAddress).SWAP_FEE_FOR_PROTOCOL_RATIO();
-        if (swapFeeForLpRatio == 0) revert InvalidFeeRatios(swapFeeForLpRatio, swapFeeForProtocolRatio);
-        if (swapFeeForLpRatio + swapFeeForProtocolRatio >= PRECISION) {
-            revert InvalidFeeRatios(swapFeeForLpRatio, swapFeeForProtocolRatio);
+        if (swapFeeForLpRatio == 0) revert ZeroLpFeeRatio();
+        if (swapFeeForLpRatio <= swapFeeForProtocolRatio) {
+            revert ProtocolFeeRatioNotBelowLpRatio(swapFeeForLpRatio, swapFeeForProtocolRatio);
         }
-        // The closed form's dominant term is `r^2 * (F+D)^2`; at `r = uint112.max` it only fits uint256
-        // while `F+D <= 65536`. Checked here so an impossible deployment fails at construction instead of
-        // overflowing on some future swap.
+        if (swapFeeForLpRatio + swapFeeForProtocolRatio >= PRECISION) {
+            revert SwapFeeRatiosConsumeTheWholeAmount(swapFeeForLpRatio, swapFeeForProtocolRatio);
+        }
         uint256 swapFeeRatio = PRECISION - swapFeeForLpRatio - swapFeeForProtocolRatio;
         if (_swapFeeSumBound(swapFeeRatio) > 65536) {
-            revert InvalidFeeRatios(swapFeeForLpRatio, swapFeeForProtocolRatio);
+            revert SwapFeeSumBreaksTheClosedForm(swapFeeForLpRatio, swapFeeForProtocolRatio);
         }
 
         SWAP_FEE_FOR_LP_RATIO = swapFeeForLpRatio;
@@ -350,10 +344,8 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         if (block.timestamp > deadline) revert DeadlineExpired(block.timestamp, deadline);
     }
 
-    /// @dev At least one side has to carry value; which side is the caller's choice. The single-token case
-    ///      is simply the other side being zero, so it needs no separate entry point.
     function _checkDesiredAmounts(uint256 amountA, uint256 amountB) private pure {
-        if (amountA == 0 && amountB == 0) revert ZeroAmount();
+        if (amountA == 0 && amountB == 0) revert ZeroDesiredAmounts();
     }
 
     function _checkTokenPair(address tokenA, address tokenB) private pure {
@@ -369,9 +361,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         IMemberNFT(MEMBER_NFT_ADDRESS).ownerOf(memberId);
     }
 
-    /// @dev BNB is the root parent token, not any LOVE20 token, so the native branch only applies to a
-    ///      community token whose parent is the wrapped native token. Checked before the pair is looked up
-    ///      and before `msg.value` is wrapped, so a mismatched token fails on its own terms.
     function _checkNativeParent(address tokenAddress) private view {
         address parentTokenAddress = ILOVE20Token(tokenAddress).PARENT_TOKEN_ADDRESS();
         if (parentTokenAddress != WRAPPED_NATIVE_ADDRESS) revert NativeInputUnsupported(parentTokenAddress);
@@ -393,8 +382,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
     // contexts
     // ---------------------------------------------------------------------------------------------
 
-    /// @dev The staking path is scoped to one community: its pair is guaranteed by `Launch`, so a missing
-    ///      pair is a misconfiguration, not a cold start. Zero reserves are allowed (first liquidity).
     function _stakeContext(address tokenAddress) private view returns (StakeContext memory context) {
         _checkRegisteredToken(tokenAddress);
 
@@ -415,8 +402,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         context.hasLiquidity = reserveToken != 0 || reserveParent != 0;
     }
 
-    /// @dev The LP path is generic: a missing pair is a legitimate cold start (the router creates it), so
-    ///      `hasLiquidity == false` covers both "no pair" and "pair with zero reserves".
     function _pairContext(address tokenA, address tokenB) private view returns (HubPair memory pool) {
         pool.tokenA = tokenA;
         pool.tokenB = tokenB;
@@ -446,8 +431,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         return (uint256(reserve1), uint256(reserve0));
     }
 
-    /// @dev The event root key for an LP fact. When the pair did not exist on entry the router created it
-    ///      during this call, so it is read back once. Only the first ever LP for a pair pays for this.
     function _resolvedPairAddress(HubPair memory pool) private view returns (address pairAddress) {
         if (pool.pairAddress != address(0)) return pool.pairAddress;
         pairAddress = IUniswapV2Factory(PAIR_FACTORY_ADDRESS).getPair(pool.tokenA, pool.tokenB);
@@ -475,8 +458,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         return _readPreparedStake(context);
     }
 
-    /// @dev `prepared` is a balance delta over the whole call: whatever core or the router does not pull
-    ///      stays on the Hub and is exactly the remainder.
     function _readPrepared(HubPair memory pool) private view returns (HubAmounts memory amounts) {
         amounts.preparedAmountA = IERC20(pool.tokenA).balanceOf(address(this)) - pool.balanceABefore;
         amounts.preparedAmountB = IERC20(pool.tokenB).balanceOf(address(this)) - pool.balanceBBefore;
@@ -504,7 +485,12 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
     function _swapToBalance(HubPair memory pool, uint256 amountADesired, uint256 amountBDesired, uint256 deadline)
         private
     {
-        if (!pool.hasLiquidity) return;
+        if (!pool.hasLiquidity) {
+            if (amountADesired == 0 || amountBDesired == 0) {
+                revert PairWithoutLiquidity(pool.tokenA, pool.tokenB);
+            }
+            return;
+        }
         (bool swapAForB, uint256 amountToSwap) =
             _swapPlan(pool.reserveA, pool.reserveB, amountADesired, amountBDesired);
         _executeSwap(pool.tokenA, pool.tokenB, swapAForB, amountToSwap, deadline);
@@ -516,7 +502,12 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         uint256 parentTokenAmountDesired,
         uint256 deadline
     ) private {
-        if (!context.hasLiquidity) return;
+        if (!context.hasLiquidity) {
+            if (tokenAmountDesired == 0 || parentTokenAmountDesired == 0) {
+                revert PairWithoutLiquidity(context.tokenAddress, context.parentTokenAddress);
+            }
+            return;
+        }
         (bool swapTokenForParent, uint256 amountToSwap) =
             _swapPlan(context.reserveToken, context.reserveParent, tokenAmountDesired, parentTokenAmountDesired);
         _executeSwap(
@@ -549,8 +540,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         _approveToken(tokenIn, address(ROUTER_ADDRESS), 0);
     }
 
-    /// @dev Decides which side is in excess and by how much has to be swapped so both sides end up in the
-    ///      pool's ratio. A single-sided input is the special case where the other desired amount is zero.
     function _swapPlan(uint256 reserveA, uint256 reserveB, uint256 amountADesired, uint256 amountBDesired)
         private
         view
@@ -574,22 +563,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         }
     }
 
-    /// @dev Closed form for "swap exactly enough to balance the pair afterwards", so a single input (or an
-    ///      unbalanced double input) funds both sides. Solved from the constant-product invariant with the
-    ///      fee `F/D`:
-    ///
-    ///        x = ( sqrt( r^2 * (F+D)^2 + 4*F*D*r*I/(rOut + b) ) - r*(F+D) ) / (2F)
-    ///
-    ///      where `I = a*rOut - r*b` and `b` is the other side's desired amount. With `b = 0` this reduces
-    ///      to the single-token solution; with `F/D = 997/1000` it reduces to the classic Uniswap V2 form.
-    ///
-    ///      The fee is stored as two 1e18 ratios (LP part and protocol part) because that is how a
-    ///      deployment is configured, but the arithmetic runs on the reduced integers: `F/D` is their
-    ///      complement in lowest terms. Doing it this way is exact — routing the 1e18 factor through the
-    ///      root would lose the low wei and can even underflow.
-    ///
-    ///      Overflow: `r^2*(F+D)^2` is the dominant term. At `r = uint112.max` it stays inside uint256 for
-    ///      `F+D <= 65536`, which the constructor enforces. The real profiles are 799..1997.
     function _amountToSwap(uint256 reserveIn, uint256 reserveOut, uint256 amountIn, uint256 amountOutAlready)
         private
         view
@@ -609,9 +582,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         return (Math.sqrt(inner) - reserveIn * sum) / (2 * feeNumerator);
     }
 
-    /// @dev The swap fee `F/D` in lowest terms. The two configured ratios sum to the fee the pair charges;
-    ///      `F = D - (lp + proto)` and `D = 1e18` reduce to small integers for every real profile
-    ///      (`997/1000`, `399/400`, `499/500`), which is what keeps the closed form exact and bounded.
     function _swapFeeFraction() private view returns (uint256 feeNumerator, uint256 feeDenominator) {
         feeDenominator = PRECISION;
         feeNumerator = PRECISION - SWAP_FEE_FOR_LP_RATIO - SWAP_FEE_FOR_PROTOCOL_RATIO;
@@ -619,8 +589,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         return (feeNumerator / divisor, feeDenominator / divisor);
     }
 
-    /// @dev The protocol's cut of the growth in sqrt(k), as `k/a` in lowest terms. Zero when the DEX has its
-    ///      protocol fee permanently off, which makes the whole `_mintFee` branch a no-op.
     function _protocolFeeFraction() private view returns (uint256 feeNumerator, uint256 feeDenominator) {
         uint256 protocolRatio = SWAP_FEE_FOR_PROTOCOL_RATIO;
         if (protocolRatio == 0) return (0, 1);
@@ -635,7 +603,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         return a;
     }
 
-    /// @dev `F + D` after reducing `F/D` to lowest terms, which is the bound the closed form needs.
     function _swapFeeSumBound(uint256 swapFeeRatio) private pure returns (uint256) {
         uint256 divisor = _gcd(swapFeeRatio, PRECISION);
         return swapFeeRatio / divisor + PRECISION / divisor;
@@ -669,15 +636,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             Math.min((amountA * totalSupply) / reserveA, (amountB * totalSupply) / reserveB);
     }
 
-    /// @dev `totalSupply` after the pair's own `_mintFee`. The protocol takes a configured share of the
-    ///      growth in sqrt(k) and mints it as LP, so the caller's proportional share is smaller than it
-    ///      would otherwise be. Written with `k/a` in lowest terms:
-    ///
-    ///        feeLp = supply * (rootK - rootKLast) * k / (a * rootK + k * rootKLast)
-    ///
-    ///      which is exactly Uniswap V2's `supply*(rootK-rootKLast)/(5*rootK+rootKLast)` when `k/a = 1/5`,
-    ///      and Pancake mainnet's `8/(17r+8rLast)` when `k/a = 8/17`. A zero `k` means the DEX takes no
-    ///      protocol fee at all, and the branch returns `totalSupply` untouched.
     function _totalSupplyAfterFeeMint(HubPair memory pool, uint256 reserveA, uint256 reserveB)
         private
         view
@@ -688,7 +646,9 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         (uint256 feeNumerator, uint256 feeDenominator) = _protocolFeeFraction();
         if (feeNumerator == 0) return totalSupply;
 
-        uint256 kLast = IUniswapV2Pair(pool.pairAddress).kLast();
+        if (_feeTo() == address(0)) return totalSupply;
+
+        uint256 kLast = _kLastOf(pool.pairAddress);
         if (kLast == 0) return totalSupply;
 
         uint256 rootK = Math.sqrt(reserveA * reserveB);
@@ -700,14 +660,25 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         return totalSupply + numerator / denominator;
     }
 
+    function _kLastOf(address pairAddress) private view returns (uint256) {
+        return _staticUint(pairAddress, IUniswapV2Pair.kLast.selector);
+    }
+
+    function _feeTo() private view returns (address) {
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return address(uint160(_staticUint(PAIR_FACTORY_ADDRESS, IUniswapV2Factory.feeTo.selector)));
+    }
+
+    function _staticUint(address target, bytes4 selector) private view returns (uint256 value) {
+        (bool ok, bytes memory data) = target.staticcall(abi.encodeWithSelector(selector));
+        if (!ok || data.length < 32) return 0;
+        value = abi.decode(data, (uint256));
+    }
+
     // ---------------------------------------------------------------------------------------------
     // staking
     // ---------------------------------------------------------------------------------------------
 
-    /// @dev Reads the remainder and applies the caller's minimums as an endpoint check: what actually
-    ///      entered the stake or the pool is `prepared - remaining`, which is precisely the semantics of
-    ///      `tokenAmountMin` / `parentTokenAmountMin`. Sharing one implementation across the staking and
-    ///      the LP path is what keeps the rule from drifting between them.
     function _settle(
         HubAmounts memory amounts,
         uint256 amountAMin,
@@ -894,8 +865,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             - memberLiquidityShares * currentPromisedWaitingPhases;
     }
 
-    /// @dev The staking side of `_quoteLp`: same maths, but the pair is the community's and the two sides
-    ///      are named token / parent.
     function _stakeLpQuote(
         StakeContext memory context,
         uint256 tokenAmountDesired,
@@ -951,8 +920,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         _refundToken(tokenB, amounts.remainingAmountB);
     }
 
-    /// @dev The native branch returns the wrapped-native remainder as native currency: the shape of the
-    ///      refund is decided by the function the caller used, never by an argument.
     function _refundNativeThenToken(address tokenAddress, HubAmounts memory amounts) private {
         if (amounts.remainingAmountB > 0) {
             IWrappedNative(WRAPPED_NATIVE_ADDRESS).withdraw(amounts.remainingAmountB);

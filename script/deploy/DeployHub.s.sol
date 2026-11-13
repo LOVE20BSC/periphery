@@ -11,21 +11,6 @@ import {IUniswapV2Pair} from "../../src/interfaces/IUniswapV2Pair.sol";
 import {IUniswapV2Router02} from "../../src/interfaces/IUniswapV2Router02.sol";
 import {LOVE20Hub} from "../../src/LOVE20Hub.sol";
 
-/// @dev Deployment gate for `LOVE20Hub`.
-///
-///      The Hub takes one injected dependency (`Stake`) and derives the rest, so a wrong `Stake` is the
-///      only way to deploy a wrong Hub — that is what the address-book cross-check rules out.
-///
-///      The DEX fee profile is not a Hub input: Stake stores it and the Hub copies it, so the Hub cannot
-///      disagree with the staking maths. What can still go wrong is Stake itself carrying the wrong
-///      profile for the DEX it points at, and that is silent: the Hub would still work, but its swap
-///      sizing and its LP projection would be off. So before broadcasting, this script re-derives the swap
-///      fee from the DEX itself by asking the router for a real quote and inverting `getAmountOut`:
-///
-///        y = x*F*rOut / (rIn*D + x*F)   =>   F/D = y*rIn / (x*(rOut - y))
-///
-///      A mismatch aborts the run and prints both values. The profile itself comes from Stake, which is
-///      the single place it is configured; the probe only cross-checks that Stake agrees with the DEX.
 contract DeployHub is Script {
     struct HubConfig {
         uint256 chainId;
@@ -35,8 +20,6 @@ contract DeployHub is Script {
         address expectedLaunch;
         address expectedMemberNFT;
         address expectedWrappedNative;
-        /// @dev A pair with non-zero reserves used to cross-check the configured swap fee. Optional: when
-        ///      zero the probe is skipped (a fresh chain has no funded pool to ask).
         address probeToken;
     }
 
@@ -68,8 +51,6 @@ contract DeployHub is Script {
         config.probeToken = bytes(probeTokenValue).length == 0 ? address(0) : vm.envAddress("SWAP_FEE_PROBE_TOKEN");
     }
 
-    /// @dev Runs entirely before `startBroadcast()`. Every derived value is re-read from `Stake` and from
-    ///      the router, code-checked, and compared against the address book core wrote before this run.
     function _validateConfig(HubConfig memory config) internal view {
         require(block.chainid == config.chainId, "Chain ID mismatch");
         require(config.stake.code.length != 0, "Stake must be a deployed contract");
@@ -123,8 +104,6 @@ contract DeployHub is Script {
         );
     }
 
-    /// @dev Cross-checks the configured swap fee against what the DEX actually charges, by inverting one
-    ///      real `getAmountsOut` quote. Skipped when no probe token is configured.
     function _validateFeeRatiosAgainstTheDex(HubConfig memory config) internal view {
         address probeToken = config.probeToken;
         if (probeToken == address(0)) {

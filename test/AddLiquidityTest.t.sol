@@ -212,14 +212,23 @@ contract AddLiquidityTest is HubTestBase {
     function testAddLiquidityWithTokenRevertsBelowAmountBMin() public {
         _fundAlice(10_000e18, 10_000e18);
 
+        // A small A side against a large B side on a 1:1 pool: balancing swaps most of B into A, so the
+        // amount that actually enters the B side is the small one. The A side clears its minimum, which
+        // is what makes this the B branch rather than the A branch.
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ILOVE20HubErrors.InsufficientAmountB.selector,
+                uint256(5_005_448_526_179_952_481_115),
+                type(uint256).max
+            )
+        );
         hub.addLiquidityWithToken(
             AddLiquidityWithTokenParams({
                 tokenA: address(token),
                 tokenB: address(wbnb),
-                amountADesired: 10_000e18,
-                amountBDesired: 1e18,
+                amountADesired: 1e18,
+                amountBDesired: 10_000e18,
                 amountAMin: 0,
                 amountBMin: type(uint256).max,
                 to: alice,

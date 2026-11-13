@@ -45,8 +45,7 @@ swap、折算、退款三者的实现在四条写入口之间**共用一份**，
 
 ### 依赖注入与 DEX 费率
 
-构造函数接受三个参数：注入的 `stakeAddress`，以及两个 **DEX 费率**（1e18 定点比例）。地址依赖全部
-由 `stakeAddress` 派生：
+构造函数**只接受一个参数** `stakeAddress`。地址依赖与两个 DEX 费率全部由它派生：
 
 ```text
 stakeAddress
@@ -54,14 +53,16 @@ stakeAddress
 ├─ PAIR_FACTORY_ADDRESS  ← Stake.PAIR_FACTORY_ADDRESS()
 ├─ LAUNCH_ADDRESS        ← Stake.LAUNCH_ADDRESS()
 ├─ MEMBER_NFT_ADDRESS    ← Stake.MEMBER_NFT_ADDRESS()
-└─ WRAPPED_NATIVE_ADDRESS ← Router.WETH()
+├─ WRAPPED_NATIVE_ADDRESS ← Router.WETH()
+├─ SWAP_FEE_FOR_LP_RATIO       ← Stake.SWAP_FEE_FOR_LP_RATIO()
+└─ SWAP_FEE_FOR_PROTOCOL_RATIO ← Stake.SWAP_FEE_FOR_PROTOCOL_RATIO()
 ```
 
 全部 `immutable` + 全大写。没有 `init`、没有 `initialized`。
 
-**费率不是 Hub 的参数**：Hub 构造函数只收 `STAKE_ADDRESS`，两个费率从 `Stake` 读取。`Stake` 本来就需要
-这两个值来预测 pair 的 `_mintFee`，所以它才是唯一来源；Hub 复制一份，两个合约就不可能配到不一致的
-档案上。两个值按「手续费的两个去向」表达，都是 1e18 定点：
+**费率不是 Hub 的参数**：`Stake` 本来就需要这两个值来预测 pair 的 `_mintFee`，所以它才是唯一来源；
+Hub 在构造期读回一份，两个合约就不可能配到不一致的档案上。两个值按「手续费的两个去向」表达，都是
+1e18 定点：
 
 | 参数 | 含义 | 本地 `dex` | Uniswap V2 | Pancake 主网 | Pancake 测试网 |
 | --- | --- | --- | --- | --- | --- |
@@ -105,6 +106,22 @@ Hub 自己的 `_amountOut` 与 Router 的 `getAmountOut` 是逐项相同的整�
 
 现在 `amountOutMin` 传 `1`，唯一作用是「Router 不得返回 0」；真正的价格保护是调用者的终点 Min。报价
 里的输出量一律取 Router 的真实返回（`getAmountsOut`），Hub 不自己预测，这样报价与写入逐 wei 相等。
+
+### `AmountExceeded` 不是溢出保护
+
+四个写入口在入参上有一条 `amount ≤ uint112.max` 的检查，超限回 `AmountExceeded(amount, maxAmount)`。
+**它挡不住 pair 溢出，也不声称能挡**。pair 的真实溢出条件是 `reserve + amountIn ≤ uint112.max`
+（`UniswapV2Pair._update` 里的 `balance <= uint112.max`），而 Hub 检查的是「单个入参量 ≤ `uint112.max`」：
+
+- 储备接近上限时，通过检查的量仍会溢出（`reserve = max/2`、`desired = max` 时 `reserve + usable > max`）；
+- 反过来，`desired > uint112.max` 但 `reserve + usable ≤ max` 的合法交易存在（实测 48 组反例），所以
+  **不能**收紧成 `reserve + desired ≤ max` —— `desired` 是「最多愿意放多少」，真正入池的是折算后的
+  `usable`；
+- 也不能改判 `reserve + usable ≤ max`：那要把 Router 的折算公式在 Hub 里再写一遍，违反「同一规则两处
+  实现」。
+
+所以它只是**荒谬输入护栏**：把「填了一个宇宙量级的数」这种明显笔误挡在路由之前。溢出由 pair 自己
+回滚，Hub 不重复实现。
 
 ### `promisedWaitingPhases` 经 Hub 时没有自由度（重要）
 
@@ -228,7 +245,7 @@ script/deploy/31_verify_hub.sh <network>          # 开源验证（按 VERIFY_SK
 | --- | --- |
 | `.account` | keystore 账户与密码（**不入库**，模板见 `.account.example`） |
 | `network.params` | `CHAIN_ID`、`RPC_URL`、`ETHERSCAN_API_KEY` |
-| `hub.params` | DEX 费率 profile 的**期望值**（`SWAP_FEE_FOR_LP_RATIO` / `SWAP_FEE_FOR_PROTOCOL_RATIO`）：权威来源是 `core.params`（Stake 存它），部署脚本断言 Stake 报告的值与之一致；另有可选的 `SWAP_FEE_PROBE_TOKEN`（广播前用真实报价反推费率做交叉校验） |
+| `hub.params` | 只有一个可选项 `SWAP_FEE_PROBE_TOKEN`：一个与 WrappedNative 组成**已注资** pair 的代币，部署脚本广播前用它做一次 `getAmountsOut` 反解费率、与 `Stake` 报告的档案交叉校验；留空则跳过（本地链常没有已注资的池子）。**两个费率 key 不在这里**——它们住在 `core.params`，由 `Stake` 拥有 |
 | `addresses.core.params` | 依赖方 `core` 的地址簿（从 `core` 复制） |
 | `addresses.uniswapv2.params` | 依赖方 DEX 的 Router / Factory / WrappedNative（从 `dex` 复制） |
 | `addresses.hub.params` | 本模块部署产物（`HUB_ADDRESS`） |

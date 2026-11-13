@@ -26,6 +26,31 @@ contract StakeLiquidityTest is HubTestBase {
         "LiquidityStaked(address,uint256,uint256,address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256)"
     );
 
+    /// @dev The deadline is the first check on every write entry, so an expired one is rejected before
+    ///      any funds move.
+    function testStakeWithTokenRejectsAnExpiredDeadline() public {
+        _fundAlice(10_000e18, 0);
+
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ILOVE20HubErrors.DeadlineExpired.selector, block.timestamp, block.timestamp - 1
+            )
+        );
+        hub.stakeLiquidityWithToken(
+            StakeLiquidityWithTokenParams({
+                tokenAddress: address(token),
+                tokenAmountDesired: 10_000e18,
+                parentTokenAmountDesired: 0,
+                tokenAmountMin: 0,
+                parentTokenAmountMin: 0,
+                promisedWaitingPhases: PROMISED_WAITING_PHASES,
+                memberId: MEMBER_ID,
+                deadline: block.timestamp - 1
+            })
+        );
+    }
+
     function testStakeWithTokenSuccess() public {
         _fundAlice(10_000e18, 0);
 
@@ -239,7 +264,13 @@ contract StakeLiquidityTest is HubTestBase {
         _fundAlice(10_000e18, 0);
 
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ILOVE20HubErrors.InsufficientTokenAmount.selector,
+                uint256(5_004_945_277_897_729_495_366),
+                type(uint256).max
+            )
+        );
         hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),
@@ -258,7 +289,13 @@ contract StakeLiquidityTest is HubTestBase {
         _fundAlice(10_000e18, 0);
 
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ILOVE20HubErrors.InsufficientParentTokenAmount.selector,
+                uint256(4_955_391_364_255_177_718_184),
+                type(uint256).max
+            )
+        );
         hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),

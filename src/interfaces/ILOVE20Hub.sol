@@ -3,8 +3,6 @@ pragma solidity =0.8.37;
 
 import {IUniswapV2Router02} from "./IUniswapV2Router02.sol";
 
-/// @dev Staking entry, ERC20 funding. Both desired amounts may be non-zero (dual sided) or only one of
-///      them (the single-token case is `desired == 0` on the other side).
 struct StakeLiquidityWithTokenParams {
     address tokenAddress;
     uint256 tokenAmountDesired;
@@ -16,8 +14,6 @@ struct StakeLiquidityWithTokenParams {
     uint256 deadline;
 }
 
-/// @dev Staking entry, native funding. The native amount is `msg.value`; `parentTokenAmountDesired` is
-///      therefore not a parameter. The parent side must be the wrapped native token.
 struct StakeLiquidityWithNativeParams {
     address tokenAddress;
     uint256 tokenAmountDesired;
@@ -28,8 +24,6 @@ struct StakeLiquidityWithNativeParams {
     uint256 deadline;
 }
 
-/// @dev LP entry, ERC20 funding, any token pair. `tokenA` / `tokenB` are the pair's two sides in the
-///      caller's own order; the Hub derives the pair from the factory and never requires `tokenA < tokenB`.
 struct AddLiquidityWithTokenParams {
     address tokenA;
     address tokenB;
@@ -41,8 +35,6 @@ struct AddLiquidityWithTokenParams {
     uint256 deadline;
 }
 
-/// @dev LP entry, native funding. The native side is `msg.value`, so it is not a parameter; the other side
-///      is `tokenAddress` and the pair is `(tokenAddress, WRAPPED_NATIVE_ADDRESS)`.
 struct AddLiquidityWithNativeParams {
     address tokenAddress;
     uint256 amountTokenDesired;
@@ -52,8 +44,6 @@ struct AddLiquidityWithNativeParams {
     uint256 deadline;
 }
 
-/// @dev One call's quote. `hasLiquidity == false` means the pair is missing or its reserves are both zero,
-///      in which case no swap happens and both desired amounts must be non-zero (first liquidity).
 struct LpQuote {
     bool hasLiquidity;
     bool willSwap;
@@ -70,8 +60,6 @@ struct LpQuote {
     uint256 suggestedAmountBMin;
 }
 
-/// @dev Staking quote: the LP quote plus the share / vote outcome core will actually credit. `memberId` and
-///      `promisedWaitingPhases` are required because both values depend on the member's existing position.
 struct StakeLiquidityQuote {
     bool hasLiquidity;
     bool willSwap;
@@ -96,7 +84,7 @@ interface ILOVE20HubErrors {
     error ZeroTokenAAddress();
     error ZeroTokenBAddress();
     error ZeroNativeTokenAmount();
-    error ZeroAmount();
+    error ZeroDesiredAmounts();
     error ZeroRecipientAddress();
     error IdenticalTokens(address tokenAddress);
     error WrappedNativeAsToken(address tokenAddress);
@@ -137,7 +125,16 @@ interface ILOVE20HubErrors {
         uint256 minPhases,
         uint256 maxPhases
     );
-    error InvalidFeeRatios(
+    error ZeroLpFeeRatio();
+    error ProtocolFeeRatioNotBelowLpRatio(
+        uint256 swapFeeForLpRatio,
+        uint256 swapFeeForProtocolRatio
+    );
+    error SwapFeeRatiosConsumeTheWholeAmount(
+        uint256 swapFeeForLpRatio,
+        uint256 swapFeeForProtocolRatio
+    );
+    error SwapFeeSumBreaksTheClosedForm(
         uint256 swapFeeForLpRatio,
         uint256 swapFeeForProtocolRatio
     );
@@ -227,8 +224,6 @@ interface ILOVE20Hub is ILOVE20HubErrors, ILOVE20HubEvents {
         view
         returns (LpQuote memory quote);
 
-    /// @dev The native amount is a parameter here (unlike the write entry, where it is `msg.value`): a
-    ///      `view` call has no `msg.value`, and the simulation needs both sides.
     function quoteLpWithNative(address tokenAddress, uint256 amountTokenDesired, uint256 amountNativeDesired)
         external
         view

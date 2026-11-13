@@ -129,7 +129,9 @@ abstract contract HubTestBase is Test {
     ///      validation can be exercised now that the profile is no longer a Hub input. The Stake is
     ///      created first and the expectation armed immediately before the Hub, because `expectRevert`
     ///      only covers the next call.
-    function _expectHubRejectsProfile(uint256 lpRatio, uint256 protocolRatio) internal {
+    function _expectHubRejectsProfile(uint256 lpRatio, uint256 protocolRatio, bytes memory expectedError)
+        internal
+    {
         MockStake bad = new MockStake(
             address(memberNFT),
             address(launch),
@@ -140,7 +142,7 @@ abstract contract HubTestBase is Test {
             lpRatio,
             protocolRatio
         );
-        vm.expectRevert();
+        vm.expectRevert(expectedError);
         new LOVE20Hub(address(bad));
     }
 

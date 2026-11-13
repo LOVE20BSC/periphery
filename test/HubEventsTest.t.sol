@@ -46,21 +46,41 @@ contract ConstructionTest is HubTestBase {
         MockStake bad = new MockStake(
             address(memberNFT), address(launch), address(router), address(factory), PHASES_MIN, PHASES_MAX, 0, 0
         );
-        vm.expectRevert(
-            abi.encodeWithSelector(ILOVE20HubErrors.InvalidFeeRatios.selector, uint256(0), uint256(0))
-        );
+        vm.expectRevert(ILOVE20HubErrors.ZeroLpFeeRatio.selector);
         new LOVE20Hub(address(bad));
     }
 
+    function testRejectsAProtocolShareAtOrAboveTheLpShare() public {
+        _expectHubRejectsProfile(
+            5,
+            5,
+            abi.encodeWithSelector(
+                ILOVE20HubErrors.ProtocolFeeRatioNotBelowLpRatio.selector, uint256(5), uint256(5)
+            )
+        );
+    }
+
     function testRejectsFeeRatiosThatConsumeTheWholeAmount() public {
-        _expectHubRejectsProfile(5e17, 5e17);
+        _expectHubRejectsProfile(
+            6e17,
+            4e17,
+            abi.encodeWithSelector(
+                ILOVE20HubErrors.SwapFeeRatiosConsumeTheWholeAmount.selector, uint256(6e17), uint256(4e17)
+            )
+        );
     }
 
     function testRejectsFeeRatiosWhoseSumBreaksTheSwapMaths() public {
         // A 0.01% fee reduces to F/D = 9999/10000, so F+D = 19999 which is still fine; a fee ratio that
         // reduces to a sum above 65536 would overflow the closed form at uint112 reserves. 1 wei out of
         // 1e18 reduces to F/D = 999999999999999999/1e18, sum 1999999999999999999 — far past the bound.
-        _expectHubRejectsProfile(1, 0);
+        _expectHubRejectsProfile(
+            1,
+            0,
+            abi.encodeWithSelector(
+                ILOVE20HubErrors.SwapFeeSumBreaksTheClosedForm.selector, uint256(1), uint256(0)
+            )
+        );
     }
 
     /// @dev The real profiles all construct successfully, which is the property that matters.

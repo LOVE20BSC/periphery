@@ -2,7 +2,7 @@
 pragma solidity =0.8.37;
 
 import {LOVE20Hub} from "../src/LOVE20Hub.sol";
-import {ILOVE20HubErrors} from "../src/interfaces/ILOVE20Hub.sol";
+import {ILOVE20HubErrors, AddLiquidityWithTokenParams} from "../src/interfaces/ILOVE20Hub.sol";
 import {MockERC20, MockWrappedNative, MockUniswapV2Pair} from "./mocks/HubMocks.sol";
 import {HubTestBase, DexProfile} from "./HubTestBase.sol";
 
@@ -20,6 +20,35 @@ contract HubFailureTest is HubTestBase {
             )
         );
         hub.quoteLp(address(emptyToken), address(wbnb), 1e18, 0);
+    }
+
+    /// @dev The same cold-start rule has to hold on the write path, not only on the quote: a one-sided
+    ///      deposit against an empty pair has no price to size a swap against, so it is rejected here
+    ///      rather than dying later inside the router or the pair with a less specific error.
+    function testRejectsAOneSidedColdStartOnTheWritePath() public {
+        (MockERC20 emptyToken,) = _newUnseededToken();
+        emptyToken.mint(alice, 1_000e18);
+        vm.prank(alice);
+        emptyToken.approve(address(hub), type(uint256).max);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ILOVE20HubErrors.PairWithoutLiquidity.selector, address(emptyToken), address(wbnb)
+            )
+        );
+        vm.prank(alice);
+        hub.addLiquidityWithToken(
+            AddLiquidityWithTokenParams({
+                tokenA: address(emptyToken),
+                tokenB: address(wbnb),
+                amountADesired: 1_000e18,
+                amountBDesired: 0,
+                amountAMin: 0,
+                amountBMin: 0,
+                to: alice,
+                deadline: block.timestamp
+            })
+        );
     }
 
     function testRejectsInputAboveTheReserveWidth() public {
@@ -57,7 +86,7 @@ contract HubFailureTest is HubTestBase {
 
     /// @dev Both sides zero is not "single token", it is nothing at all.
     function testRejectsBothDesiredAmountsZero() public {
-        vm.expectRevert(ILOVE20HubErrors.ZeroAmount.selector);
+        vm.expectRevert(ILOVE20HubErrors.ZeroDesiredAmounts.selector);
         hub.quoteLp(address(token), address(wbnb), 0, 0);
     }
 
@@ -146,7 +175,13 @@ contract SwapMathBoundTest is HubTestBase {
         // A 1 wei fee leaves F/D = 999999999999999999/1e18, which reduces no further: F+D is ~2e18, far
         // past the 65536 the closed form needs. The constructor rejects it instead of letting a future
         // swap overflow.
-        _expectHubRejectsProfile(1, 0);
+        _expectHubRejectsProfile(
+            1,
+            0,
+            abi.encodeWithSelector(
+                ILOVE20HubErrors.SwapFeeSumBreaksTheClosedForm.selector, uint256(1), uint256(0)
+            )
+        );
 
         // Coarse ratios reduce to small integers, so a large nominal fee is still fine: 50% reduces to
         // 1/2 and constructs successfully.
