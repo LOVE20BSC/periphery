@@ -53,13 +53,13 @@ stakeAddress
 
 ### `promisedWaitingPhases` 经 Hub 时没有自由度（重要）
 
-`core` 的等待期规则依赖**调用者是不是该 `memberId` 的 NFT 持有人**：非持有人在目标已有仓位时
-只能**精确沿用**现有等待期（见 `core/docs` 规格 `04-stake.md` 的拒绝条件表）。而 Hub 调
+`core` 的等待期规则依赖**调用者是不是该 `memberId` 的 NFT 持有人**：非持有人在目标已写过等待期时
+只能**精确沿用**现有值（见 `core/docs` 规格 `04-stake.md` 的拒绝条件表）。而 Hub 调
 `stakeLiquidity` 时 `msg.sender` 是 **Hub 自己**，永远不会等于 NFT 持有人，所以：
 
-- **空仓位**（该 `memberId` 在该社区还没有任何质押）：`promisedWaitingPhases` 可自由指定，含 `MAX`；
-- **已有仓位**：**必须精确传入当前值**，否则回滚 `PromisedWaitingPhasesDecreased`。经 Hub 无法提升
-  等待期。
+- **未写过**（该成员记录在该社区的 `promisedWaitingPhases` 仍为 `0`）：可自由指定，含 `MAX`；
+- **已写过**（非零）：**必须精确传入当前值**，否则回滚 `PromisedWaitingPhasesRewritten`。经 Hub 无法
+  提升等待期。
 
 这是 core 鉴权语义的必然结果，不是 Hub 的额外限制。要提升等待期，由持有人**直接调用**
 `Stake.stakeLiquidity`；Hub 不提供这条路径，也不打算复制它。
