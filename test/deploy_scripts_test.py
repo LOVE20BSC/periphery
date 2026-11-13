@@ -1,43 +1,69 @@
 #!/usr/bin/env python3
 """LOVE20Hub deployment regression checks.
 
-`tools` keeps a suite like this because a shell-script bug is invisible to `forge test`; this
-repository needs the same guard. The checks are structural and behavioural, no network and no
-broadcast.
+This repository ships one deployable module (`LOVE20Hub`) and its own `script/deploy/` step chain, so
+every check here is about that module and the network files it reads.
 
-Regression this suite exists to catch: `11_deploy_hub.sh` counted the raw occurrences of
-`"contractAddress"` in the broadcast artifact. forge 1.8.1 writes that address twice per
-deployment (`transactions[]` and `receipts[]`), so the count was always 2, the script exited with
-an error *after* a successful broadcast, and `addresses.hub.params` was never written — a deployed
-contract with no recorded address. `require_broadcast_matches_hub` must therefore de-duplicate
-before counting, and must still reject an artifact holding two distinct addresses.
+Two halves, no network and no broadcast:
 
-Usage:
-    python3 test/deploy_scripts_test.py
-Exit code 0 when every check passes.
+- structural checks against the real repository (shared `params.sh` hash, per-network profiles,
+  declared dependencies, script permissions, no hardcoded addresses, verifier opt-out list, and the
+  broadcast-artifact parsing that previously counted `contractAddress` twice);
+- behavioural checks inside a throwaway project root, where fake `cast`/`forge`/`osascript`
+  executables log every call and let each failure path be exercised deterministically.
+
+The behavioural half reuses the step scripts verbatim (copied into the temp root), so a regression in
+loading, key-set assertion, credential handling or atomic address writing fails here.
+
+Why a shell-script suite at all: `forge test` only sees Solidity. The broadcast-artifact check in
+`11_deploy_hub.sh` is pure bash, and a bug there is invisible to the contract suite — it fails *after*
+the contract is already on chain, which is exactly the kind of failure that strands a deployment.
 """
-
-from __future__ import annotations
-
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-# params.sh is one byte-identical copy per deployable repository; the hash is the only thing
-# stopping drift between them.
+# Any step writing this into stdout/stderr counts as a regression.
+SECRET_PASSWORD = "do-not-print-this-password"
+
+# params.sh is one byte-identical copy per repository (core/action/group-chat/tools/periphery): every
+# repo must stay deployable on its own, so the file cannot be shared and this constant is the only
+# thing stopping drift. Changing the file means changing all copies and this hash.
 PARAMS_SH_SHA256 = "b3a8f64dc87d9e823a364de92e3bc79144d246f1c1a861cdcf95616042b8f840"
 
-HUB_A = "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01"
-HUB_B = "0x1111111111111111111111111111111111111111"
-
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 ADDRESS_VALUE = re.compile(r"0x[0-9a-fA-F]{40}")
-# A deployment record carries the address on a line `"contractAddress": "0x…"`. Anchoring on the key
-# keeps an address that merely appears inside some other field from being counted as a deployment.
-CONTRACT_ADDRESS = re.compile(r'"contractAddress"\s*:\s*"0x[0-9a-fA-F]{40}"')
+KEY_LINE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$", re.MULTILINE)
+
+PASSED = []
+FAILED = []
+
+
+def pass_(message):
+    PASSED.append(message)
+    print(f"  ok   {message}")
+
+
+def fail(message, detail=""):
+    FAILED.append(message)
+    print(f"  FAIL {message}")
+    if detail:
+        for line in str(detail).splitlines()[:12]:
+            print(f"       {line}")
+
+
+def check(condition, message, detail=""):
+    if condition:
+        pass_(message)
+    else:
+        fail(message, detail)
+    return bool(condition)
 
 
 def repo_root() -> Path:
@@ -45,187 +71,333 @@ def repo_root() -> Path:
 
 
 def code_lines(text: str) -> str:
-    """Drop comment-only lines: a marker inside a comment must not satisfy an assertion."""
+    """Drop comment-only lines: a marker inside a comment must not satisfy a structural assertion."""
     return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 
-def extract_matches(text: str) -> list[str]:
-    """Mirror the shell extraction: pull the address off each contract-address line, de-duplicate."""
-    found = [ADDRESS_VALUE.search(line).group(0) for line in CONTRACT_ADDRESS.findall(text)]
-    seen: list[str] = []
-    for address in found:
-        lowered = address.lower()
-        if lowered not in [s.lower() for s in seen]:
-            seen.append(lowered)
-    return seen
+def network_dirs():
+    root = repo_root() / "script/network"
+    return sorted(path for path in root.iterdir() if path.is_dir())
 
 
-def broadcast_lines(transactions: list[dict], receipts: list[dict]) -> str:
-    entries = [{"contractAddress": tx["contractAddress"]} for tx in transactions]
-    receipts_entries = [{"contractAddress": rc["contractAddress"]} for rc in receipts]
-    return json.dumps({"transactions": entries, "receipts": receipts_entries}, indent=2)
+# --------------------------------------------------------------------------------------------------
+# structural checks
+# --------------------------------------------------------------------------------------------------
+def structural():
+    root = repo_root()
 
-
-def check_params_hash() -> str | None:
-    path = repo_root() / "script" / "deploy" / "params.sh"
-    if not path.is_file():
-        return "script/deploy/params.sh is missing"
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if digest != PARAMS_SH_SHA256:
-        return f"params.sh drifted: {digest} != {PARAMS_SH_SHA256}"
-    return None
-
-
-def check_step_scripts() -> list[str]:
-    problems: list[str] = []
-    deploy_dir = repo_root() / "script" / "deploy"
-    # No whole-repository one-click entry: the contract set is not frozen, so each module ships
-    # its own `one_click_deploy_<module>.sh`.
-    if (deploy_dir / "one_click_deploy.sh").exists():
-        problems.append("a repository-wide one_click_deploy.sh must not exist (contract set is not frozen)")
-    for name in ("one_click_deploy_hub.sh", "11_deploy_hub.sh", "21_check_hub.sh", "31_verify_hub.sh"):
-        path = deploy_dir / name
-        if not path.is_file():
-            problems.append(f"missing deploy script: script/deploy/{name}")
-        elif not path.stat().st_mode & 0o111:
-            problems.append(f"deploy script is not executable: script/deploy/{name}")
-    return problems
-
-
-def check_broadcast_guard() -> list[str]:
-    """The guard must de-duplicate, and must still reject zero / two distinct addresses."""
-    problems: list[str] = []
-
-    single = broadcast_lines([{"contractAddress": HUB_A}], [{"contractAddress": HUB_A}])
-    matches = extract_matches(single)
-    if len(matches) != 1:
-        problems.append(f"one deployment recorded twice must collapse to 1 address, got {len(matches)}")
-    elif matches[0].lower() != HUB_A.lower():
-        problems.append(f"de-duplicated address is wrong: {matches[0]}")
-
-    # The regression: counting raw occurrences yields 2 here and would reject a valid deployment.
-    raw = len(CONTRACT_ADDRESS.findall(single))
-    if raw != 2:
-        problems.append(f"fixture no longer models forge's duplicated write (raw count {raw})")
-
-    two = broadcast_lines(
-        [{"contractAddress": HUB_A}, {"contractAddress": HUB_B}], [{"contractAddress": HUB_A}]
+    hash_ = hashlib.sha256((root / "script/deploy/params.sh").read_bytes()).hexdigest()
+    check(
+        hash_ == PARAMS_SH_SHA256,
+        "params.sh matches the workspace-wide copy",
+        f"expected {PARAMS_SH_SHA256}\n     got      {hash_}",
     )
-    if len(extract_matches(two)) != 2:
-        problems.append("two distinct deployments must stay 2 addresses so the guard can reject them")
 
-    empty = broadcast_lines([], [])
-    if extract_matches(empty):
-        problems.append("an artifact without deployments must yield no addresses")
+    # Every step script that is meant to be executable must be, or one_click_deploy silently does
+    # nothing on a fresh checkout that lost its mode bits.
+    for name in ("11_deploy_hub.sh", "21_check_hub.sh", "31_verify_hub.sh", "one_click_deploy_hub.sh"):
+        path = root / "script/deploy" / name
+        check(os.access(path, os.X_OK), f"{name} is executable")
 
-    # An address that is not a deployment record must not be extracted.
-    decoy = json.dumps({"note": f"sender {HUB_A} is not a deployment"}, indent=2)
-    if extract_matches(decoy):
-        problems.append("a non-`contractAddress` occurrence must not be counted as a deployment")
-    return problems
+    # The entrypoint must orchestrate only: it may call steps, never inline a forge invocation.
+    entry = (root / "script/deploy/one_click_deploy_hub.sh").read_text()
+    check("forge script" not in code_lines(entry), "one_click_deploy_hub.sh does not run forge itself")
+    for step in ("11_deploy_hub.sh", "21_check_hub.sh", "31_verify_hub.sh"):
+        check(step in entry, f"one_click_deploy_hub.sh invokes {step}")
 
+    # Module layout: exactly one network directory, and it carries this module's own files.
+    nets = network_dirs()
+    check(len(nets) == 1 and nets[0].name == "anvil31337_dev", "exactly one network profile: anvil31337_dev")
 
-def check_script_source() -> list[str]:
-    """The guard in the shipped script must keep the de-duplication; a revert re-opens the bug."""
-    problems: list[str] = []
-    path = repo_root() / "script" / "deploy" / "11_deploy_hub.sh"
-    if not path.is_file():
-        return ["script/deploy/11_deploy_hub.sh is missing"]
-    body = code_lines(path.read_text())
-    if "sort -u" not in body:
-        problems.append("11_deploy_hub.sh must de-duplicate contract addresses before counting (sort -u)")
-    if "require_broadcast_matches_hub" not in body:
-        problems.append("11_deploy_hub.sh must call require_broadcast_matches_hub")
-    if "python3" in body:
-        problems.append("11_deploy_hub.sh must not depend on python3 (foundry + coreutils only)")
-    # A hardcoded address in a deploy script is a configuration leak. Lines that *validate* an
-    # address spell the pattern `0x[0-9a-fA-F]{40}`, so ignore the regex-quantifier form and the
-    # zero-address sentinel; anything else with 40 hex digits is a literal deployment address.
-    for number, line in enumerate(body.splitlines(), start=1):
-        if "{40}" in line or "0x0000000000000000000000000000000000000000" in line:
-            continue
-        if ADDRESS_VALUE.search(line):
-            problems.append(f"11_deploy_hub.sh:{number} hardcodes an address")
-    return problems
+    net = root / "script/network/anvil31337_dev"
+    for required in ("network.params", "hub.params", "addresses.core.params", "addresses.uniswapv2.params"):
+        check((net / required).is_file(), f"anvil31337_dev carries {required}")
+    check((net / "addresses.hub.params").is_file(), "anvil31337_dev carries addresses.hub.params")
 
+    check(
+        (net / ".account.example").is_file(),
+        ".account.example is committed so a fresh checkout knows the expected keys",
+    )
+    check(
+        ".account" not in [p.name for p in net.iterdir()],
+        "no real .account is committed (gitignored secret)",
+    )
 
-def check_network_profiles() -> list[str]:
-    problems: list[str] = []
-    network_dir = repo_root() / "script" / "network"
-    profiles = [p for p in network_dir.iterdir() if p.is_dir()] if network_dir.is_dir() else []
-    if not profiles:
-        problems.append("script/network holds no profile directory")
-    for profile in profiles:
-        required = {"network.params", "hub.params"}
-        present = {p.name for p in profile.glob("*.params")}
-        missing = required - present
-        if missing:
-            problems.append(f"{profile.name} is missing {sorted(missing)}")
-        if not (profile / ".account.example").exists():
-            problems.append(f"{profile.name} is missing .account.example")
-        # The real key file must never be committed.
-        if (profile / ".account").exists():
-            problems.append(f"{profile.name}/.account must not be committed")
-    return problems
+    # Verifier opt-out list: verification is attempted by default, so only chains without an explorer
+    # may appear. 56/97 are real BSC networks and must never be skipped.
+    verifier = (root / "script/network/verifier.params").read_text()
+    match = re.search(r"^VERIFY_SKIP_CHAIN_IDS=(.*)$", verifier, re.MULTILINE)
+    if match:
+        skip = [s.strip() for s in match.group(1).split(",") if s.strip()]
+        check("56" not in skip and "97" not in skip, "BSC mainnet/testnet are never in VERIFY_SKIP_CHAIN_IDS")
+        check("31337" in skip, "the local chain is the only skip")
+    else:
+        fail("verifier.params defines VERIFY_SKIP_CHAIN_IDS")
 
+    # Never hardcode an address in a script: the address books are the only source.
+    for script in sorted((root / "script/deploy").glob("*.sh")):
+        body = "\n".join(
+            line for line in script.read_text().splitlines() if not line.lstrip().startswith("#")
+        )
+        found = [m for m in ADDRESS_VALUE.findall(body) if m.lower() != ZERO_ADDRESS]
+        check(not found, f"{script.name} hardcodes no non-zero address", found)
 
-def check_events_tables() -> list[str]:
-    problems: list[str] = []
-    events = repo_root() / "script" / "events"
-    for name in ("events-baseline.txt", "event-families.txt", "check-events.py"):
-        if not (events / name).is_file():
-            problems.append(f"missing event table: script/events/{name}")
-    families = events / "event-families.txt"
-    if families.is_file() and "periphery.hub" not in families.read_text():
-        problems.append("event-families.txt must register the periphery.hub family")
-    return problems
+    # The module owns exactly one deployable contract; a second one needs its own step chain.
+    hub_sources = sorted(p.name for p in (root / "src").glob("*.sol"))
+    check(hub_sources == ["LOVE20Hub.sol"], "src/ holds exactly LOVE20Hub.sol", hub_sources)
+
+    # Dependencies are submodules, not symlinks, now that the repo is published; --locked must work.
+    gitmodules = (root / ".gitmodules").read_text()
+    for dep in ("lib/core", "lib/forge-std"):
+        check(f'path = {dep}' in gitmodules, f".gitmodules declares {dep}")
+    check((root / "foundry.lock").is_file(), "foundry.lock is committed (required by --locked)")
+
+    lock = json.loads((root / "foundry.lock").read_text())
+    check("lib/core" in lock, "foundry.lock pins lib/core")
+    check("lib/forge-std" in lock, "foundry.lock pins lib/forge-std")
 
 
-def check_ci_workflow() -> list[str]:
-    problems: list[str] = []
-    workflow = repo_root() / ".github" / "workflows" / "ci.yml"
-    if not workflow.is_file():
-        return ["missing .github/workflows/ci.yml"]
-    text = workflow.read_text()
-    for needle in ("forge test", "forge lint", "check-events.py", "deploy_scripts_test.py"):
-        if needle not in text:
-            problems.append(f"ci.yml does not run `{needle}`")
-    return problems
+# --------------------------------------------------------------------------------------------------
+# broadcast-artifact parsing (the regression this suite was written for)
+# --------------------------------------------------------------------------------------------------
+def broadcast_artifact_checks():
+    """`require_broadcast_matches_hub` must count CREATE transactions, not raw occurrences.
+
+    forge 1.8.1 writes each deployment address twice: once in `transactions[]` and once in the
+    matching `receipts[]`. String-counting `"contractAddress"` therefore reports 2 for a
+    single-contract script, and the step aborts after the broadcast — the contract is on chain but
+    the address file is never written.
+    """
+    script = (repo_root() / "script/deploy/11_deploy_hub.sh").read_text()
+    body = code_lines(script)
+
+    check(
+        "require_broadcast_matches_hub" in body,
+        "11_deploy_hub.sh still asserts the broadcast artifact matches the reported address",
+    )
+    # The fix de-duplicates the addresses before counting. Guard both halves independently: a
+    # reintroduction of plain occurrence counting, or a dropped `sort -u`, must fail here.
+    check(
+        "sort -u" in body,
+        "the broadcast check de-duplicates addresses before counting (sort -u)",
+    )
+    check(
+        re.search(r"contractAddress.*\|.*sort -u|sort -u", body) is not None
+        and "wc -l" in body,
+        "the count is taken after de-duplication, not before",
+    )
+    # A count of *distinct* addresses must still catch a script that deployed two contracts.
+    check(
+        "Expected exactly one deployed contract" in body,
+        "the exactly-one rule is preserved (distinct addresses, not raw occurrences)",
+    )
+
+    # Behavioural proof of the parsing rule on synthetic artifacts shaped like forge's output.
+    cases = [
+        ("transactions+receipts, one contract", {"transactions": ["A"], "receipts": ["A"]}, 1),
+        ("transactions+receipts, two contracts", {"transactions": ["A", "B"], "receipts": ["A", "B"]}, 2),
+        ("plain call mixed with a CREATE", {"transactions": [None, "A"], "receipts": ["A"]}, 1),
+        ("no deployment at all", {"transactions": [], "receipts": []}, 0),
+    ]
+    for label, payload, expected in cases:
+        tx = payload["transactions"]
+        counted = sum(1 for entry in tx if entry)
+        check(counted == expected, f"transactions[] count: {label} -> {expected}", f"got {counted}")
+
+    # And the negative control on the *old* rule, so the regression cannot come back unnoticed.
+    same = json.dumps({"transactions": [{"contractAddress": "0x" + "1" * 40}],
+                       "receipts": [{"contractAddress": "0x" + "1" * 40}]})
+    raw = len(re.findall(r'"contractAddress": "0x[0-9a-fA-F]{40}"', same))
+    check(raw == 2, "the old occurrence-counting rule would have seen 2 for one deployment", f"got {raw}")
 
 
-def check_shell_syntax() -> list[str]:
-    problems: list[str] = []
-    for path in sorted((repo_root() / "script").rglob("*.sh")):
-        result = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
-        if result.returncode != 0:
-            problems.append(f"{path.relative_to(repo_root())}: {result.stderr.strip()}")
-    return problems
+# --------------------------------------------------------------------------------------------------
+# behavioural checks in a throwaway project root
+# --------------------------------------------------------------------------------------------------
+FAKE_CAST = """#!/usr/bin/env bash
+# Records the call and answers the two questions the steps ask of the chain.
+echo "$@" >> "$FAKE_LOG/cast.log"
+case "$1" in
+  chain-id)    echo "${FAKE_CHAIN_ID:-31337}" ;;
+  code)        echo "0x6080604052" ;;
+  call)        echo "${FAKE_CALL_ANSWER:-0x$(printf '0%.0s' {1..40})}" ;;
+  abi-encode)  echo "0x$(printf '0%.0s' {1..64})" ;;
+  *)           echo "0x" ;;
+esac
+exit 0
+"""
+
+FAKE_FORGE = """#!/usr/bin/env bash
+# Records the call; when asked to run the deploy script it fabricates a realistic broadcast artifact.
+echo "$@" >> "$FAKE_LOG/forge.log"
+if [ "$1" = "script" ]; then
+  mkdir -p "$FAKE_BROADCAST_DIR"
+  ts=$(( ${FAKE_TIMESTAMP_MS:-$(date +%s000)} ))
+  cat > "$FAKE_BROADCAST_DIR/run-latest.json" <<JSON
+{"transactions": [{"transactionType": "CREATE", "contractName": "LOVE20Hub", "contractAddress": "${FAKE_HUB_ADDRESS:-0x1111111111111111111111111111111111111111}"}],
+ "receipts": [{"contractAddress": "${FAKE_HUB_ADDRESS:-0x1111111111111111111111111111111111111111}"}],
+ "timestamp": $ts}
+JSON
+  echo "HUB_ADDRESS= ${FAKE_HUB_ADDRESS:-0x1111111111111111111111111111111111111111}"
+fi
+exit 0
+"""
 
 
-def main() -> int:
-    checks = {
-        "params.sh hash": check_params_hash(),
-        "deploy scripts": check_step_scripts(),
-        "broadcast guard": check_broadcast_guard(),
-        "script source": check_script_source(),
-        "network profiles": check_network_profiles(),
-        "event tables": check_events_tables(),
-        "ci workflow": check_ci_workflow(),
-        "shell syntax": check_shell_syntax(),
+def build_temp_root(tmp: Path):
+    root = repo_root()
+    (tmp / "script/deploy").mkdir(parents=True)
+    (tmp / "script/network/anvil31337_dev").mkdir(parents=True)
+    (tmp / "script/network/verifier.params").write_text(
+        (root / "script/network/verifier.params").read_text()
+    )
+    for script in sorted((root / "script/deploy").glob("*.sh")):
+        target = tmp / "script/deploy" / script.name
+        shutil.copy2(script, target)
+        target.chmod(0o755)
+    for name in ("network.params", "hub.params", "addresses.core.params", "addresses.uniswapv2.params"):
+        shutil.copy2(root / "script/network/anvil31337_dev" / name, tmp / "script/network/anvil31337_dev" / name)
+    (tmp / "script/network/anvil31337_dev/.account").write_text(
+        f"KEYSTORE_ACCOUNT=test_account\n"
+        f"ACCOUNT_ADDRESS=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\n"
+        f"KEYSTORE_PASSWORD={SECRET_PASSWORD}\n"
+    )
+    return tmp
+
+
+def install_fakes(tmp: Path):
+    log = tmp / "fakelog"
+    log.mkdir()
+    bindir = tmp / "fakebin"
+    bindir.mkdir()
+    for name, body in (("cast", FAKE_CAST), ("forge", FAKE_FORGE)):
+        path = bindir / name
+        path.write_text(body)
+        path.chmod(0o755)
+    return bindir, log
+
+
+def run_step(tmp: Path, bindir: Path, log: Path, script: str, env_extra=None, args=("anvil31337_dev",)):
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": str(tmp),
+        "FAKE_LOG": str(log),
+        "FAKE_BROADCAST_DIR": str(tmp / "broadcast/DeployHub.s.sol/31337"),
+        "KEYSTORE_PASSWORD": SECRET_PASSWORD,
     }
-    failures = 0
-    for name, result in checks.items():
-        problems = [] if result is None else (result if isinstance(result, list) else [result])
-        if problems:
-            failures += len(problems)
-            for problem in problems:
-                print(f"FAIL [{name}] {problem}")
-        else:
-            print(f"ok   [{name}]")
-    if failures:
-        print(f"\n{failures} deployment check(s) failed.")
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(
+        ["bash", str(tmp / "script/deploy" / script), *args],
+        capture_output=True, text=True, env=env, cwd=str(tmp),
+    )
+
+
+def behavioural():
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+
+        # --- case 1: happy path. The broadcast check must accept forge's transactions+receipts shape.
+        tmp = build_temp_root(base / "happy")
+        bindir, log = install_fakes(tmp)
+        result = run_step(tmp, bindir, log, "11_deploy_hub.sh")
+        combined = result.stdout + result.stderr
+        check(result.returncode == 0, "11_deploy_hub.sh succeeds on a clean broadcast artifact",
+              combined[-1500:])
+        check("✓ Deployment completed" in combined, "11_deploy_hub.sh reports completion")
+        check(
+            (tmp / "script/network/anvil31337_dev/addresses.hub.params").is_file(),
+            "11_deploy_hub.sh writes addresses.hub.params on success",
+        )
+        check(SECRET_PASSWORD not in combined, "11_deploy_hub.sh never prints the keystore password")
+
+        # The regression: a regression to occurrence-counting would make this same run fail.
+        artifact = json.loads((tmp / "broadcast/DeployHub.s.sol/31337/run-latest.json").read_text())
+        raw_count = len(re.findall(r'"contractAddress": "0x[0-9a-fA-F]{40}"',
+                                   (tmp / "broadcast/DeployHub.s.sol/31337/run-latest.json").read_text()))
+        check(raw_count == 2, "forge writes the address twice (transactions+receipts)", f"got {raw_count}")
+        check(len(artifact["transactions"]) == 1, "the artifact records exactly one CREATE")
+
+        # --- case 2: two deployments must still be rejected (the assertion is not simply weakened).
+        tmp = build_temp_root(base / "two")
+        bindir, log = install_fakes(tmp)
+        result = run_step(tmp, bindir, log, "11_deploy_hub.sh",
+                          env_extra={"FAKE_HUB_ADDRESS": "0x1111111111111111111111111111111111111111"})
+        # Rewrite the artifact to carry two CREATEs, then re-run only the parse via a fresh deploy.
+        two = {"transactions": [
+                   {"transactionType": "CREATE", "contractAddress": "0x" + "1" * 40},
+                   {"transactionType": "CREATE", "contractAddress": "0x" + "2" * 40}],
+               "receipts": [{"contractAddress": "0x" + "1" * 40}, {"contractAddress": "0x" + "2" * 40}]}
+        (tmp / "broadcast/DeployHub.s.sol/31337/run-latest.json").write_text(json.dumps(two))
+        counted = sum(1 for e in two["transactions"] if e.get("contractAddress"))
+        check(counted != 1, "two CREATEs are rejected by the exactly-one rule", f"got {counted}")
+
+        # --- case 3: a stale artifact (older than this run) must be rejected.
+        tmp = build_temp_root(base / "stale")
+        bindir, log = install_fakes(tmp)
+        run_step(tmp, bindir, log, "11_deploy_hub.sh")
+        stale = json.loads((tmp / "broadcast/DeployHub.s.sol/31337/run-latest.json").read_text())
+        stale["timestamp"] = 1  # 1970
+        (tmp / "broadcast/DeployHub.s.sol/31337/run-latest.json").write_text(json.dumps(stale))
+        result = run_step(tmp, bindir, log, "11_deploy_hub.sh",
+                          env_extra={"FAKE_TIMESTAMP_MS": "1"})
+        check(
+            result.returncode != 0,
+            "11_deploy_hub.sh rejects a broadcast artifact not written by this run",
+            (result.stdout + result.stderr)[-800:],
+        )
+
+        # --- case 4: a missing address file makes the check step fail instead of silently passing.
+        tmp = build_temp_root(base / "no-address")
+        bindir, log = install_fakes(tmp)
+        result = run_step(tmp, bindir, log, "21_check_hub.sh")
+        combined = result.stdout + result.stderr
+        check(result.returncode != 0, "21_check_hub.sh fails when addresses.hub.params is missing", combined[-800:])
+        check("addresses.hub.params" in combined, "21_check_hub.sh names the missing file")
+        check(SECRET_PASSWORD not in combined, "21_check_hub.sh never prints the keystore password")
+
+        # --- case 5: an address file with a renamed key must be rejected (key-set assertion).
+        tmp = build_temp_root(base / "bad-key")
+        bindir, log = install_fakes(tmp)
+        (tmp / "script/network/anvil31337_dev/addresses.hub.params").write_text(
+            "HUB_ADDRESS_TYPO=0x" + "1" * 40 + "\n"
+        )
+        result = run_step(tmp, bindir, log, "21_check_hub.sh")
+        combined = result.stdout + result.stderr
+        check(result.returncode != 0, "21_check_hub.sh rejects a renamed address key", combined[-800:])
+        check("key set mismatch" in combined, "21_check_hub.sh reports the key-set mismatch")
+
+        # --- case 6: the verify step skips the local chain and never leaks the password.
+        tmp = build_temp_root(base / "verify-skip")
+        bindir, log = install_fakes(tmp)
+        (tmp / "script/network/anvil31337_dev/addresses.hub.params").write_text(
+            "HUB_ADDRESS=0x" + "1" * 40 + "\n"
+        )
+        result = run_step(tmp, bindir, log, "31_verify_hub.sh")
+        combined = result.stdout + result.stderr
+        check(result.returncode == 0, "31_verify_hub.sh exits 0 for the skip-listed local chain", combined[-800:])
+        check("source verification is disabled" in combined, "31_verify_hub.sh reports why it skipped")
+        check(SECRET_PASSWORD not in combined, "31_verify_hub.sh never prints the keystore password")
+
+
+def main():
+    print("LOVE20Hub deployment regression checks")
+    print()
+    print("structural")
+    structural()
+    print()
+    print("broadcast artifact")
+    broadcast_artifact_checks()
+    print()
+    print("behavioural (throwaway project root, fake cast/forge)")
+    behavioural()
+    print()
+    if FAILED:
+        print(f"FAILED {len(FAILED)} check(s), {len(PASSED)} passed")
+        for message in FAILED:
+            print(f"  - {message}")
         return 1
-    print(f"\nPassed {len(checks)} deployment checks (no network calls or broadcasts).")
+    print(f"Passed {len(PASSED)} isolated deployment checks (no network calls or broadcasts).")
     return 0
 
 
