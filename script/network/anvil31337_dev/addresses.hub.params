@@ -1,1 +1,8 @@
-HUB_ADDRESS=0x95401dc811bb5740090279Ba06cfA8fcF6113778
+# Written by 11_deploy_hub.sh after a successful deploy, and asserted by 21_check_hub.sh: the key set
+# must equal the expected contract set exactly.
+#
+# Empty on purpose. `anvil`'s bootstrap does not deploy the Hub (the Hub is the repo's own module, not
+# part of the local-chain orchestration), so there is no address every checkout would agree on. A
+# committed address from someone else's chain would be worse than an empty value: 21_check_hub.sh would
+# read its code from a chain where that address is empty and fail for the wrong reason.
+HUB_ADDRESS=
