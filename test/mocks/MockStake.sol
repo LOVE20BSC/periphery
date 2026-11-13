@@ -237,22 +237,31 @@ contract MockStake is IStake {
         return 0;
     }
 
-    function totalStake(address)
+    function totalStake(address tokenAddress)
         external
-        pure
+        view
         override
         returns (uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256)
     {
-        return (0, 0, 0, 0, 0, 0, 0, 0);
+        uint256 totalLiquidityShares = _totalLiquidityShares[tokenAddress];
+        return (totalLiquidityShares, totalLiquidityShares, 0, 0, 0, 0, 0, 0);
     }
 
-    function memberStake(address, uint256)
+    function memberStake(address tokenAddress, uint256 memberId)
         external
-        pure
+        view
         override
         returns (uint256, uint256, uint256, uint256, uint256, uint256, uint256)
     {
-        return (0, 0, 0, 0, 0, 0, 0);
+        return (
+            _liquiditySharesByMemberId[tokenAddress][memberId],
+            0,
+            _promisedWaitingPhasesByMemberId[tokenAddress][memberId],
+            0,
+            0,
+            0,
+            0
+        );
     }
 
     function boostStakeCap(address, uint256) external pure override returns (uint256, uint256) {

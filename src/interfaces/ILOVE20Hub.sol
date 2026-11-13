@@ -54,7 +54,7 @@ struct SingleTokenLpQuote {
     uint256 expectedLiquidity;
 }
 
-struct SingleTokenStakeQuote {
+struct SingleTokenStakeLiquidityQuote {
     bool willSwap;
     address swapTokenIn;
     address swapTokenOut;
@@ -64,7 +64,9 @@ struct SingleTokenStakeQuote {
     uint256 preparedParentTokenAmount;
     uint256 usableTokenAmount;
     uint256 usableParentTokenAmount;
-    uint256 expectedLiquidity;
+    uint256 liquiditySharesAdded;
+    uint256 liquidityShares;
+    uint256 govVotesAdded;
     uint256 suggestedTokenAmountMin;
     uint256 suggestedParentTokenAmountMin;
 }
@@ -96,6 +98,11 @@ interface ILOVE20HubErrors {
     error InsufficientParentTokenAmount(
         uint256 amount,
         uint256 minAmount
+    );
+    error InvalidPromisedWaitingPhases(
+        uint256 value,
+        uint256 minPhases,
+        uint256 maxPhases
     );
     error NativeTokenSenderRejected(address sender);
     error NativeRefundFailed();
@@ -185,13 +192,18 @@ interface ILOVE20Hub is ILOVE20HubErrors, ILOVE20HubEvents {
         view
         returns (SingleTokenLpQuote memory quote);
 
-    function quoteSingleTokenStake(address tokenAddress, address inputTokenAddress, uint256 inputTokenAmount)
-        external
-        view
-        returns (SingleTokenStakeQuote memory quote);
+    function quoteSingleTokenStakeLiquidity(
+        address tokenAddress,
+        address inputTokenAddress,
+        uint256 inputTokenAmount,
+        uint256 memberId,
+        uint256 promisedWaitingPhases
+    ) external view returns (SingleTokenStakeLiquidityQuote memory quote);
 
-    function quoteSingleTokenStakeWithNative(address tokenAddress, uint256 inputNativeTokenAmount)
-        external
-        view
-        returns (SingleTokenStakeQuote memory quote);
+    function quoteSingleTokenStakeLiquidityWithNative(
+        address tokenAddress,
+        uint256 inputNativeTokenAmount,
+        uint256 memberId,
+        uint256 promisedWaitingPhases
+    ) external view returns (SingleTokenStakeLiquidityQuote memory quote);
 }

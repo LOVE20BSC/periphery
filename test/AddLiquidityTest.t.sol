@@ -7,7 +7,7 @@ import {
     AddLiquidityWithTokenParams,
     AddLiquidityWithNativeParams,
     SingleTokenLpQuote,
-    SingleTokenStakeQuote
+    SingleTokenStakeLiquidityQuote
 } from "../src/interfaces/ILOVE20Hub.sol";
 import {MockERC20, MockWrappedNative} from "./mocks/HubMocks.sol";
 import {HubTestBase} from "./HubTestBase.sol";
@@ -197,7 +197,8 @@ contract QuoteTest is HubTestBase {
     }
 
     function testStakeQuoteReportsTheEndpointAmounts() public view {
-        SingleTokenStakeQuote memory quote = hub.quoteSingleTokenStake(address(token), address(token), 10_000e18);
+        SingleTokenStakeLiquidityQuote memory quote =
+            hub.quoteSingleTokenStakeLiquidity(address(token), address(token), 10_000e18, MEMBER_ID, PROMISED_WAITING_PHASES);
 
         assertEq(
             quote.suggestedTokenAmountMin, quote.usableTokenAmount, "suggestion is the usable token amount"
@@ -231,9 +232,9 @@ contract QuoteTest is HubTestBase {
         uint256 supplyBefore = pair.totalSupply();
 
         hub.quoteSingleTokenLp(address(token), address(token), 10_000e18);
-        hub.quoteSingleTokenStake(address(token), address(token), 10_000e18);
+        hub.quoteSingleTokenStakeLiquidity(address(token), address(token), 10_000e18, MEMBER_ID, PROMISED_WAITING_PHASES);
         hub.quoteSingleTokenLpWithNative(address(token), 10_000e18);
-        hub.quoteSingleTokenStakeWithNative(address(token), 10_000e18);
+        hub.quoteSingleTokenStakeLiquidityWithNative(address(token), 10_000e18, MEMBER_ID, PROMISED_WAITING_PHASES);
 
         assertEq(token.balanceOf(address(pair)), pairTokenBefore, "pair untouched");
         assertEq(wbnb.balanceOf(address(pair)), pairParentBefore, "pair untouched");

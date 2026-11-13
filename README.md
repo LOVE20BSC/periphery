@@ -17,7 +17,10 @@
 
 - **单币质押**：`stakeLiquidityWithToken`（ERC20 输入）/ `stakeLiquidityWithNative`（原生币输入）；
 - **单币组 LP**：`addLiquidityWithToken` / `addLiquidityWithNative`，LP 直接发给 `to`，不产生质押记账；
-- **报价**：`quoteSingleTokenLp` / `quoteSingleTokenStake`，纯 `view` 试算。
+- **报价**：`quoteSingleTokenLp` / `quoteSingleTokenStakeLiquidity`，纯 `view` 试算。
+  质押报价必须带 `memberId` 与 `promisedWaitingPhases`，并额外返回 `liquiditySharesAdded` /
+  `liquidityShares` / `govVotesAdded`——流动性质押对外可读的是**份额、治理票与承诺解锁期**，
+  LP 只是 core 的内部记账，不对外暴露。
 
 swap、折算、退款三者的实现在四条写入口之间**共用一份**，数学只存在一处。
 

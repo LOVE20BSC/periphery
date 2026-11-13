@@ -16,7 +16,7 @@ import {
     AddLiquidityWithTokenParams,
     AddLiquidityWithNativeParams,
     SingleTokenLpQuote,
-    SingleTokenStakeQuote
+    SingleTokenStakeLiquidityQuote
 } from "./interfaces/ILOVE20Hub.sol";
 import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
@@ -247,26 +247,43 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         return _quoteSingleToken(pool, WRAPPED_NATIVE_ADDRESS, inputNativeTokenAmount);
     }
 
-    function quoteSingleTokenStake(address tokenAddress, address inputTokenAddress, uint256 inputTokenAmount)
-        external
-        view
-        returns (SingleTokenStakeQuote memory quote)
-    {
+    function quoteSingleTokenStakeLiquidity(
+        address tokenAddress,
+        address inputTokenAddress,
+        uint256 inputTokenAmount,
+        uint256 memberId,
+        uint256 promisedWaitingPhases
+    ) external view returns (SingleTokenStakeLiquidityQuote memory quote) {
         _checkTokenInput(tokenAddress, inputTokenAddress, inputTokenAmount);
+        _checkMemberId(memberId);
+        _checkPromisedWaitingPhases(promisedWaitingPhases);
         HubPool memory pool = _hubPool(tokenAddress);
-        return _stakeQuote(_quoteSingleToken(pool, inputTokenAddress, inputTokenAmount));
+        return _stakeQuote(
+            _quoteSingleToken(pool, inputTokenAddress, inputTokenAmount),
+            tokenAddress,
+            memberId,
+            promisedWaitingPhases
+        );
     }
 
-    function quoteSingleTokenStakeWithNative(address tokenAddress, uint256 inputNativeTokenAmount)
-        external
-        view
-        returns (SingleTokenStakeQuote memory quote)
-    {
+    function quoteSingleTokenStakeLiquidityWithNative(
+        address tokenAddress,
+        uint256 inputNativeTokenAmount,
+        uint256 memberId,
+        uint256 promisedWaitingPhases
+    ) external view returns (SingleTokenStakeLiquidityQuote memory quote) {
         _checkNativeInput(tokenAddress, inputNativeTokenAmount);
         _checkRegisteredToken(tokenAddress);
         _checkNativeParent(tokenAddress);
+        _checkMemberId(memberId);
+        _checkPromisedWaitingPhases(promisedWaitingPhases);
         HubPool memory pool = _hubPool(tokenAddress);
-        return _stakeQuote(_quoteSingleToken(pool, WRAPPED_NATIVE_ADDRESS, inputNativeTokenAmount));
+        return _stakeQuote(
+            _quoteSingleToken(pool, WRAPPED_NATIVE_ADDRESS, inputNativeTokenAmount),
+            tokenAddress,
+            memberId,
+            promisedWaitingPhases
+        );
     }
 
     function _checkDeadline(uint256 deadline) private view {
@@ -308,6 +325,14 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
     function _checkInputToken(HubPool memory pool, address inputTokenAddress) private pure {
         if (inputTokenAddress != pool.tokenAddress && inputTokenAddress != pool.parentTokenAddress) {
             revert InvalidInputTokenAddress(inputTokenAddress);
+        }
+    }
+
+    function _checkPromisedWaitingPhases(uint256 promisedWaitingPhases) private view {
+        uint256 minPhases = IStake(STAKE_ADDRESS).PROMISED_WAITING_PHASES_MIN();
+        uint256 maxPhases = IStake(STAKE_ADDRESS).PROMISED_WAITING_PHASES_MAX();
+        if (promisedWaitingPhases < minPhases || promisedWaitingPhases > maxPhases) {
+            revert InvalidPromisedWaitingPhases(promisedWaitingPhases, minPhases, maxPhases);
         }
     }
 
@@ -607,11 +632,12 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             _liquidityMinted(reserveToken, reserveParent, totalSupplyAfterFeeMint, tokenAmountUsed, parentAmountUsed);
     }
 
-    function _stakeQuote(SingleTokenLpQuote memory quote)
-        private
-        pure
-        returns (SingleTokenStakeQuote memory stakeQuote)
-    {
+    function _stakeQuote(
+        SingleTokenLpQuote memory quote,
+        address tokenAddress,
+        uint256 memberId,
+        uint256 promisedWaitingPhases
+    ) private view returns (SingleTokenStakeLiquidityQuote memory stakeQuote) {
         stakeQuote.willSwap = quote.willSwap;
         stakeQuote.swapTokenIn = quote.swapTokenIn;
         stakeQuote.swapTokenOut = quote.swapTokenOut;
@@ -621,9 +647,19 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         stakeQuote.preparedParentTokenAmount = quote.preparedParentTokenAmount;
         stakeQuote.usableTokenAmount = quote.usableTokenAmount;
         stakeQuote.usableParentTokenAmount = quote.usableParentTokenAmount;
-        stakeQuote.expectedLiquidity = quote.expectedLiquidity;
         stakeQuote.suggestedTokenAmountMin = quote.usableTokenAmount;
         stakeQuote.suggestedParentTokenAmountMin = quote.usableParentTokenAmount;
+
+        (uint256 totalLiquidityShares, , uint256 withdrawableLp, , , , , ) = IStake(STAKE_ADDRESS).totalStake(tokenAddress);
+        (uint256 memberLiquidityShares, , uint256 currentPromisedWaitingPhases, , , , ) =
+            IStake(STAKE_ADDRESS).memberStake(tokenAddress, memberId);
+
+        stakeQuote.liquiditySharesAdded = totalLiquidityShares == 0 || withdrawableLp == 0
+            ? quote.expectedLiquidity
+            : (totalLiquidityShares * quote.expectedLiquidity) / withdrawableLp;
+        stakeQuote.liquidityShares = memberLiquidityShares + stakeQuote.liquiditySharesAdded;
+        stakeQuote.govVotesAdded =
+            stakeQuote.liquidityShares * promisedWaitingPhases - memberLiquidityShares * currentPromisedWaitingPhases;
     }
 
     function _approveToken(address tokenAddress, address spender, uint256 amount) private {

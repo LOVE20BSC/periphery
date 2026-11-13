@@ -5,7 +5,11 @@ import {Vm} from "@forge-std/Vm.sol";
 import {IStake} from "@core/interfaces/IStake.sol";
 import {LOVE20Hub} from "../src/LOVE20Hub.sol";
 import {ILOVE20HubErrors} from "../src/interfaces/ILOVE20Hub.sol";
-import {StakeLiquidityWithTokenParams, StakeLiquidityWithNativeParams} from "../src/interfaces/ILOVE20Hub.sol";
+import {
+    StakeLiquidityWithTokenParams,
+    StakeLiquidityWithNativeParams,
+    SingleTokenStakeLiquidityQuote
+} from "../src/interfaces/ILOVE20Hub.sol";
 import {MockERC20, MockWrappedNative} from "./mocks/HubMocks.sol";
 import {HubTestBase} from "./HubTestBase.sol";
 
@@ -113,9 +117,80 @@ contract StakeLiquidityTest is HubTestBase {
         assertEq(token.balanceOf(address(hub)), 0, "hub retains no community token");
     }
 
+    /// @notice The stake quote must predict the numbers the write actually produces, not just the
+    ///         orchestration amounts. The quote is the only thing a frontend has before signing, so a
+    ///         predicted share count that differs from the realized one is a lie about the position.
+    function testStakeQuotePredictsTheRealizedSharesAndVotes() public {
+        _fundAlice(10_000e18, 0);
+
+        SingleTokenStakeLiquidityQuote memory quote =
+            hub.quoteSingleTokenStakeLiquidity(address(token), address(token), 10_000e18, MEMBER_ID, PROMISED_WAITING_PHASES);
+        assertGt(quote.liquiditySharesAdded, 0, "quote predicts a non-zero share increment");
+        assertGt(quote.govVotesAdded, 0, "quote predicts a non-zero vote increment");
+
+        vm.prank(alice);
+        (uint256 govVotesAdded, uint256 liquiditySharesAdded) = hub.stakeLiquidityWithToken(
+            StakeLiquidityWithTokenParams({
+                tokenAddress: address(token),
+                inputTokenAddress: address(token),
+                inputTokenAmount: 10_000e18,
+                tokenAmountMin: 0,
+                parentTokenAmountMin: 0,
+                promisedWaitingPhases: PROMISED_WAITING_PHASES,
+                memberId: MEMBER_ID,
+                deadline: block.timestamp
+            })
+        );
+
+        assertEq(quote.liquiditySharesAdded, liquiditySharesAdded, "predicted share increment");
+        assertEq(quote.govVotesAdded, govVotesAdded, "predicted vote increment");
+        (uint256 realizedShares, , , , , , ) = IStake(address(stake)).memberStake(address(token), MEMBER_ID);
+        assertEq(quote.liquidityShares, realizedShares, "predicted post-stake share balance");
+    }
+
+    /// @notice A second stake into an existing position: the prediction has to account for the shares
+    ///         already held, otherwise `govVotesAdded` is computed against the wrong baseline.
+    function testStakeQuotePredictsOnTopOfAnExistingPosition() public {
+        _fundAlice(20_000e18, 0);
+        vm.prank(alice);
+        hub.stakeLiquidityWithToken(
+            StakeLiquidityWithTokenParams({
+                tokenAddress: address(token),
+                inputTokenAddress: address(token),
+                inputTokenAmount: 10_000e18,
+                tokenAmountMin: 0,
+                parentTokenAmountMin: 0,
+                promisedWaitingPhases: PROMISED_WAITING_PHASES,
+                memberId: MEMBER_ID,
+                deadline: block.timestamp
+            })
+        );
+
+        SingleTokenStakeLiquidityQuote memory quote =
+            hub.quoteSingleTokenStakeLiquidity(address(token), address(token), 10_000e18, MEMBER_ID, PROMISED_WAITING_PHASES);
+
+        vm.prank(alice);
+        (uint256 govVotesAdded, uint256 liquiditySharesAdded) = hub.stakeLiquidityWithToken(
+            StakeLiquidityWithTokenParams({
+                tokenAddress: address(token),
+                inputTokenAddress: address(token),
+                inputTokenAmount: 10_000e18,
+                tokenAmountMin: 0,
+                parentTokenAmountMin: 0,
+                promisedWaitingPhases: PROMISED_WAITING_PHASES,
+                memberId: MEMBER_ID,
+                deadline: block.timestamp
+            })
+        );
+
+        assertEq(quote.liquiditySharesAdded, liquiditySharesAdded, "predicted increment on a non-empty position");
+        assertEq(quote.govVotesAdded, govVotesAdded, "predicted vote increment on a non-empty position");
+    }
+
     function testStakeWithTokenRevertsWhenEnteredBelowTokenMin() public {
         _fundAlice(10_000e18, 0);
-        uint256 enteredToken = hub.quoteSingleTokenStake(address(token), address(token), 10_000e18).usableTokenAmount;
+        uint256 enteredToken = hub.quoteSingleTokenStakeLiquidity(address(token), address(token), 10_000e18, MEMBER_ID, PROMISED_WAITING_PHASES)
+            .usableTokenAmount;
 
         // One wei above what the whole chain actually deposits: the endpoint check has to see it.
         vm.prank(alice);
@@ -138,7 +213,8 @@ contract StakeLiquidityTest is HubTestBase {
 
     function testStakeWithTokenRevertsWhenEnteredBelowParentMin() public {
         _fundAlice(10_000e18, 0);
-        uint256 enteredParent = hub.quoteSingleTokenStake(address(token), address(token), 10_000e18).usableParentTokenAmount;
+        uint256 enteredParent = hub.quoteSingleTokenStakeLiquidity(address(token), address(token), 10_000e18, MEMBER_ID, PROMISED_WAITING_PHASES)
+            .usableParentTokenAmount;
 
         vm.prank(alice);
         vm.expectRevert(
