@@ -201,12 +201,7 @@ interface ILOVE20Hub is ILOVE20HubErrors, ILOVE20HubEvents {
 
     function WRAPPED_NATIVE_ADDRESS() external view returns (address);
 
-    /// @dev The fee the pair keeps for liquidity providers, in 1e18 units (0.30% = 3e15). Copied from
-    ///      `Stake` at construction, which is the single place the DEX profile is configured.
     function SWAP_FEE_FOR_LP_RATIO() external view returns (uint256);
-
-    /// @dev The fee the protocol takes out of that, in 1e18 units (Pancake mainnet: 0.08% = 8e14).
-    ///      Zero means the DEX has its protocol fee permanently off. Copied from `Stake`.
     function SWAP_FEE_FOR_PROTOCOL_RATIO() external view returns (uint256);
 
     function stakeLiquidityWithToken(StakeLiquidityWithTokenParams calldata params)
