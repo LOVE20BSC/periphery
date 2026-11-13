@@ -15,18 +15,39 @@ import {
     StakeLiquidityWithNativeParams,
     AddLiquidityWithTokenParams,
     AddLiquidityWithNativeParams,
-    SingleTokenLpQuote,
-    SingleTokenStakeLiquidityQuote
+    LpQuote,
+    StakeLiquidityQuote
 } from "./interfaces/ILOVE20Hub.sol";
 import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
 import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router02.sol";
 import {IWrappedNative} from "./interfaces/IWrappedNative.sol";
 
-/// @dev One call's snapshot of the community pool. `balanceTokenBefore` / `balanceParentBefore` are the
-///      Hub's own balances at entry, so every prepared / remaining amount is a plain balance delta and
-///      core's conversion formula is never re-derived here.
-struct HubPool {
+/// @dev One call's snapshot of the pair it trades against. `balanceABefore` / `balanceBBefore` are the Hub's
+///      own balances at entry, so every prepared / remaining amount is a plain balance delta.
+struct HubPair {
+    address tokenA;
+    address tokenB;
+    address pairAddress;
+    bool hasLiquidity;
+    uint256 balanceABefore;
+    uint256 balanceBBefore;
+    uint256 reserveA;
+    uint256 reserveB;
+}
+
+/// @dev The four amounts one call reports. Computed once per call and read by the minimum check, by the
+///      refund and by the event, which keeps the entry points inside the stack limit under the standard
+///      optimizer without a second copy of the arithmetic.
+struct HubAmounts {
+    uint256 preparedAmountA;
+    uint256 preparedAmountB;
+    uint256 remainingAmountA;
+    uint256 remainingAmountB;
+}
+
+/// @dev Staking entry: a community token and its parent, both sides resolved from the registry.
+struct StakeContext {
     address tokenAddress;
     address parentTokenAddress;
     address pairAddress;
@@ -34,16 +55,7 @@ struct HubPool {
     uint256 balanceParentBefore;
     uint256 reserveToken;
     uint256 reserveParent;
-}
-
-/// @dev The four amounts one call reports. Computed once per call and read by the minimum check, by the
-///      refund and by the event, which keeps the entry points inside the stack limit under the standard
-///      optimizer without a second copy of the arithmetic.
-struct HubAmounts {
-    uint256 preparedTokenAmount;
-    uint256 preparedParentTokenAmount;
-    uint256 remainingTokenAmount;
-    uint256 remainingParentTokenAmount;
+    bool hasLiquidity;
 }
 
 contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
@@ -53,12 +65,16 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
     uint256 private constant UNISWAP_V2_MINIMUM_LIQUIDITY = 1000;
     uint256 private constant UNISWAP_V2_MAX_RESERVE = type(uint112).max;
 
-    /// @dev Bound on the swap leg only, as a 1e18 ratio (1%). The caller's minimums describe the endpoint
-    ///      of the whole chain, so they cannot be passed down as `amountOutMin`: the pool cannot move
-    ///      between reading the reserves and swapping inside one transaction, so `_amountOut` of the
-    ///      pre-swap reserves is what the router should return, and this bound turns a sandwich on the
-    ///      swap leg into a revert while leaving room for rounding.
-    uint256 private constant SWAP_OUTPUT_TOLERANCE_RATIO = 1e16;
+    /// @dev Both fee ratios are 1e18 fixed point fractions of the swap amount. They are deployment inputs
+    ///      rather than constants because the Hub may point at any Uniswap V2 compatible DEX, and the two
+    ///      values differ per deployment: the local `dex` charges 0.30% and takes no protocol fee, Pancake
+    ///      mainnet charges 0.25% of which 0.08% goes to the protocol, Pancake testnet 0.20%/0.05%.
+    ///
+    ///      `SWAP_FEE_FOR_LP_RATIO` is the part the pair keeps; `SWAP_FEE_FOR_PROTOCOL_RATIO` is the part
+    ///      the DEX takes out of it. The swap fee actually charged is their sum, and it is also exactly the
+    ///      fee the constant-product swap maths uses.
+    uint256 public immutable SWAP_FEE_FOR_LP_RATIO;
+    uint256 public immutable SWAP_FEE_FOR_PROTOCOL_RATIO;
 
     address public immutable STAKE_ADDRESS;
 
@@ -73,7 +89,22 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
     address public immutable WRAPPED_NATIVE_ADDRESS;
 
     // forge-lint: disable-next-item(missing-zero-check)
-    constructor(address stakeAddress) {
+    constructor(address stakeAddress, uint256 swapFeeForLpRatio, uint256 swapFeeForProtocolRatio) {
+        if (swapFeeForLpRatio == 0) revert InvalidFeeRatios(swapFeeForLpRatio, swapFeeForProtocolRatio);
+        if (swapFeeForLpRatio + swapFeeForProtocolRatio >= PRECISION) {
+            revert InvalidFeeRatios(swapFeeForLpRatio, swapFeeForProtocolRatio);
+        }
+        // The closed form's dominant term is `r^2 * (F+D)^2`; at `r = uint112.max` it only fits uint256
+        // while `F+D <= 65536`. Checked here so an impossible deployment fails at construction instead of
+        // overflowing on some future swap.
+        uint256 swapFeeRatio = PRECISION - swapFeeForLpRatio - swapFeeForProtocolRatio;
+        if (_swapFeeSumBound(swapFeeRatio) > 65536) {
+            revert InvalidFeeRatios(swapFeeForLpRatio, swapFeeForProtocolRatio);
+        }
+
+        SWAP_FEE_FOR_LP_RATIO = swapFeeForLpRatio;
+        SWAP_FEE_FOR_PROTOCOL_RATIO = swapFeeForProtocolRatio;
+
         STAKE_ADDRESS = stakeAddress;
         address routerAddress = IStake(stakeAddress).ROUTER_ADDRESS();
         PAIR_FACTORY_ADDRESS = IStake(stakeAddress).PAIR_FACTORY_ADDRESS();
@@ -87,22 +118,33 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         if (msg.sender != WRAPPED_NATIVE_ADDRESS) revert NativeTokenSenderRejected(msg.sender);
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // staking: a community token and its parent, resolved from the registry
+    // ---------------------------------------------------------------------------------------------
+
     function stakeLiquidityWithToken(StakeLiquidityWithTokenParams calldata params)
         external
         nonReentrant
         returns (uint256 govVotesAdded, uint256 liquiditySharesAdded)
     {
         _checkDeadline(params.deadline);
-        _checkTokenInput(params.tokenAddress, params.inputTokenAddress, params.inputTokenAmount);
+        if (params.tokenAddress == address(0)) revert ZeroTokenAddress();
+        _checkDesiredAmounts(params.tokenAmountDesired, params.parentTokenAmountDesired);
         _checkMemberId(params.memberId);
+        _checkPromisedWaitingPhases(params.promisedWaitingPhases);
 
-        HubPool memory pool = _hubPool(params.tokenAddress);
-        _checkInputToken(pool, params.inputTokenAddress);
-        IERC20(params.inputTokenAddress).safeTransferFrom(msg.sender, address(this), params.inputTokenAmount);
-        HubAmounts memory amounts = _prepare(pool, params.inputTokenAddress, params.inputTokenAmount, params.deadline);
+        StakeContext memory context = _stakeContext(params.tokenAddress);
+        IERC20(params.tokenAddress).safeTransferFrom(msg.sender, address(this), params.tokenAmountDesired);
+        IERC20(context.parentTokenAddress).safeTransferFrom(
+            msg.sender, address(this), params.parentTokenAmountDesired
+        );
+
+        HubAmounts memory amounts = _prepareStake(
+            context, params.tokenAmountDesired, params.parentTokenAmountDesired, params.deadline
+        );
 
         (govVotesAdded, liquiditySharesAdded) = _stake(
-            pool,
+            context,
             amounts,
             params.promisedWaitingPhases,
             params.memberId,
@@ -110,16 +152,16 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             params.parentTokenAmountMin
         );
 
-        _refundTokens(pool, amounts);
+        _refundTokens(context.tokenAddress, context.parentTokenAddress, amounts);
 
         emit HubLiquidityStakedWithToken({
-            tokenAddress: pool.tokenAddress,
+            tokenAddress: context.tokenAddress,
             memberId: params.memberId,
             caller: msg.sender,
-            preparedTokenAmount: amounts.preparedTokenAmount,
-            preparedParentTokenAmount: amounts.preparedParentTokenAmount,
-            remainingTokenAmount: amounts.remainingTokenAmount,
-            remainingParentTokenAmount: amounts.remainingParentTokenAmount
+            preparedTokenAmount: amounts.preparedAmountA,
+            preparedParentTokenAmount: amounts.preparedAmountB,
+            remainingTokenAmount: amounts.remainingAmountA,
+            remainingParentTokenAmount: amounts.remainingAmountB
         });
     }
 
@@ -130,16 +172,23 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         returns (uint256 govVotesAdded, uint256 liquiditySharesAdded)
     {
         _checkDeadline(params.deadline);
-        _checkNativeInput(params.tokenAddress, msg.value);
+        if (params.tokenAddress == address(0)) revert ZeroTokenAddress();
+        if (msg.value == 0) revert ZeroNativeTokenAmount();
+        _checkDesiredAmounts(params.tokenAmountDesired, msg.value);
         _checkMemberId(params.memberId);
+        _checkPromisedWaitingPhases(params.promisedWaitingPhases);
         _checkRegisteredToken(params.tokenAddress);
         _checkNativeParent(params.tokenAddress);
 
-        HubPool memory pool = _hubPool(params.tokenAddress);
-        HubAmounts memory amounts = _prepareNative(pool, params.deadline);
+        StakeContext memory context = _stakeContext(params.tokenAddress);
+        IERC20(params.tokenAddress).safeTransferFrom(msg.sender, address(this), params.tokenAmountDesired);
+        IWrappedNative(WRAPPED_NATIVE_ADDRESS).deposit{value: msg.value}();
+
+        HubAmounts memory amounts =
+            _prepareStake(context, params.tokenAmountDesired, msg.value, params.deadline);
 
         (govVotesAdded, liquiditySharesAdded) = _stake(
-            pool,
+            context,
             amounts,
             params.promisedWaitingPhases,
             params.memberId,
@@ -147,18 +196,22 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             params.parentTokenAmountMin
         );
 
-        _refundNativeThenTokens(pool, amounts);
+        _refundNativeThenToken(context.tokenAddress, amounts);
 
         emit HubLiquidityStakedWithNative({
-            tokenAddress: pool.tokenAddress,
+            tokenAddress: context.tokenAddress,
             memberId: params.memberId,
             caller: msg.sender,
-            preparedTokenAmount: amounts.preparedTokenAmount,
-            preparedParentTokenAmount: amounts.preparedParentTokenAmount,
-            remainingTokenAmount: amounts.remainingTokenAmount,
-            remainingParentTokenAmount: amounts.remainingParentTokenAmount
+            preparedTokenAmount: amounts.preparedAmountA,
+            preparedParentTokenAmount: amounts.preparedAmountB,
+            remainingTokenAmount: amounts.remainingAmountA,
+            remainingParentTokenAmount: amounts.remainingAmountB
         });
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // LP: any token pair, no registry lookup
+    // ---------------------------------------------------------------------------------------------
 
     function addLiquidityWithToken(AddLiquidityWithTokenParams calldata params)
         external
@@ -166,28 +219,31 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         returns (uint256 liquidity)
     {
         _checkDeadline(params.deadline);
-        _checkTokenInput(params.tokenAddress, params.inputTokenAddress, params.inputTokenAmount);
+        _checkTokenPair(params.tokenA, params.tokenB);
         if (params.to == address(0)) revert ZeroRecipientAddress();
+        _checkDesiredAmounts(params.amountADesired, params.amountBDesired);
 
-        HubPool memory pool = _hubPool(params.tokenAddress);
-        _checkInputToken(pool, params.inputTokenAddress);
-        IERC20(params.inputTokenAddress).safeTransferFrom(msg.sender, address(this), params.inputTokenAmount);
-        HubAmounts memory amounts = _prepare(pool, params.inputTokenAddress, params.inputTokenAmount, params.deadline);
+        HubPair memory pool = _pairContext(params.tokenA, params.tokenB);
+        IERC20(params.tokenA).safeTransferFrom(msg.sender, address(this), params.amountADesired);
+        IERC20(params.tokenB).safeTransferFrom(msg.sender, address(this), params.amountBDesired);
+
+        HubAmounts memory amounts =
+            _prepare(pool, params.amountADesired, params.amountBDesired, params.deadline);
 
         liquidity = _addLiquidity(
-            pool, amounts, params.to, params.deadline, params.tokenAmountMin, params.parentTokenAmountMin
+            pool, amounts, params.to, params.deadline, params.amountAMin, params.amountBMin
         );
 
-        _refundTokens(pool, amounts);
+        _refundTokens(pool.tokenA, pool.tokenB, amounts);
 
         emit HubLiquidityAddedWithToken({
-            tokenAddress: pool.tokenAddress,
+            pairAddress: _resolvedPairAddress(pool),
             to: params.to,
             caller: msg.sender,
-            preparedTokenAmount: amounts.preparedTokenAmount,
-            preparedParentTokenAmount: amounts.preparedParentTokenAmount,
-            remainingTokenAmount: amounts.remainingTokenAmount,
-            remainingParentTokenAmount: amounts.remainingParentTokenAmount,
+            preparedAmountA: amounts.preparedAmountA,
+            preparedAmountB: amounts.preparedAmountB,
+            remainingAmountA: amounts.remainingAmountA,
+            remainingAmountB: amounts.remainingAmountB,
             liquidity: liquidity
         });
     }
@@ -199,92 +255,99 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         returns (uint256 liquidity)
     {
         _checkDeadline(params.deadline);
-        _checkNativeInput(params.tokenAddress, msg.value);
+        if (params.tokenAddress == address(0)) revert ZeroTokenAddress();
+        if (params.tokenAddress == WRAPPED_NATIVE_ADDRESS) revert WrappedNativeAsToken(params.tokenAddress);
+        if (msg.value == 0) revert ZeroNativeTokenAmount();
         if (params.to == address(0)) revert ZeroRecipientAddress();
-        _checkRegisteredToken(params.tokenAddress);
-        _checkNativeParent(params.tokenAddress);
+        _checkDesiredAmounts(params.amountTokenDesired, msg.value);
 
-        HubPool memory pool = _hubPool(params.tokenAddress);
-        HubAmounts memory amounts = _prepareNative(pool, params.deadline);
+        HubPair memory pool = _pairContext(params.tokenAddress, WRAPPED_NATIVE_ADDRESS);
+        IERC20(params.tokenAddress).safeTransferFrom(msg.sender, address(this), params.amountTokenDesired);
+        IWrappedNative(WRAPPED_NATIVE_ADDRESS).deposit{value: msg.value}();
+
+        HubAmounts memory amounts =
+            _prepare(pool, params.amountTokenDesired, msg.value, params.deadline);
 
         liquidity = _addLiquidity(
-            pool, amounts, params.to, params.deadline, params.tokenAmountMin, params.parentTokenAmountMin
+            pool, amounts, params.to, params.deadline, params.amountTokenMin, params.amountNativeMin
         );
 
-        _refundNativeThenTokens(pool, amounts);
+        _refundNativeThenToken(pool.tokenA, amounts);
 
         emit HubLiquidityAddedWithNative({
-            tokenAddress: pool.tokenAddress,
+            pairAddress: _resolvedPairAddress(pool),
             to: params.to,
             caller: msg.sender,
-            preparedTokenAmount: amounts.preparedTokenAmount,
-            preparedParentTokenAmount: amounts.preparedParentTokenAmount,
-            remainingTokenAmount: amounts.remainingTokenAmount,
-            remainingParentTokenAmount: amounts.remainingParentTokenAmount,
+            preparedAmountA: amounts.preparedAmountA,
+            preparedAmountB: amounts.preparedAmountB,
+            remainingAmountA: amounts.remainingAmountA,
+            remainingAmountB: amounts.remainingAmountB,
             liquidity: liquidity
         });
     }
 
-    function quoteSingleTokenLp(address tokenAddress, address inputTokenAddress, uint256 inputTokenAmount)
+    // ---------------------------------------------------------------------------------------------
+    // quotes
+    // ---------------------------------------------------------------------------------------------
+
+    function quoteLp(address tokenA, address tokenB, uint256 amountADesired, uint256 amountBDesired)
         external
         view
-        returns (SingleTokenLpQuote memory quote)
+        returns (LpQuote memory quote)
     {
-        _checkTokenInput(tokenAddress, inputTokenAddress, inputTokenAmount);
-        HubPool memory pool = _hubPool(tokenAddress);
-        return _quoteSingleToken(pool, inputTokenAddress, inputTokenAmount);
+        _checkTokenPair(tokenA, tokenB);
+        _checkDesiredAmounts(amountADesired, amountBDesired);
+        HubPair memory pool = _pairContext(tokenA, tokenB);
+        return _quoteLp(pool, amountADesired, amountBDesired);
     }
 
-    function quoteSingleTokenLpWithNative(address tokenAddress, uint256 inputNativeTokenAmount)
+    function quoteLpWithNative(address tokenAddress, uint256 amountTokenDesired, uint256 amountNativeDesired)
         external
         view
-        returns (SingleTokenLpQuote memory quote)
+        returns (LpQuote memory quote)
     {
-        _checkNativeInput(tokenAddress, inputNativeTokenAmount);
-        _checkRegisteredToken(tokenAddress);
-        _checkNativeParent(tokenAddress);
-        HubPool memory pool = _hubPool(tokenAddress);
-        return _quoteSingleToken(pool, WRAPPED_NATIVE_ADDRESS, inputNativeTokenAmount);
+        if (tokenAddress == address(0)) revert ZeroTokenAddress();
+        if (tokenAddress == WRAPPED_NATIVE_ADDRESS) revert WrappedNativeAsToken(tokenAddress);
+        _checkDesiredAmounts(amountTokenDesired, amountNativeDesired);
+        HubPair memory pool = _pairContext(tokenAddress, WRAPPED_NATIVE_ADDRESS);
+        return _quoteLp(pool, amountTokenDesired, amountNativeDesired);
     }
 
-    function quoteSingleTokenStakeLiquidity(
+    function quoteStakeLiquidity(
         address tokenAddress,
-        address inputTokenAddress,
-        uint256 inputTokenAmount,
+        uint256 tokenAmountDesired,
+        uint256 parentTokenAmountDesired,
         uint256 memberId,
         uint256 promisedWaitingPhases
-    ) external view returns (SingleTokenStakeLiquidityQuote memory quote) {
-        _checkTokenInput(tokenAddress, inputTokenAddress, inputTokenAmount);
+    ) external view returns (StakeLiquidityQuote memory quote) {
+        if (tokenAddress == address(0)) revert ZeroTokenAddress();
+        _checkDesiredAmounts(tokenAmountDesired, parentTokenAmountDesired);
         _checkMemberId(memberId);
         _checkPromisedWaitingPhases(promisedWaitingPhases);
-        HubPool memory pool = _hubPool(tokenAddress);
-        return _stakeQuote(
-            _quoteSingleToken(pool, inputTokenAddress, inputTokenAmount),
-            tokenAddress,
-            memberId,
-            promisedWaitingPhases
-        );
+        StakeContext memory context = _stakeContext(tokenAddress);
+        return _stakeQuote(context, tokenAmountDesired, parentTokenAmountDesired, memberId, promisedWaitingPhases);
     }
 
-    function quoteSingleTokenStakeLiquidityWithNative(
+    function quoteStakeLiquidityWithNative(
         address tokenAddress,
-        uint256 inputNativeTokenAmount,
+        uint256 tokenAmountDesired,
+        uint256 parentTokenAmountDesired,
         uint256 memberId,
         uint256 promisedWaitingPhases
-    ) external view returns (SingleTokenStakeLiquidityQuote memory quote) {
-        _checkNativeInput(tokenAddress, inputNativeTokenAmount);
-        _checkRegisteredToken(tokenAddress);
-        _checkNativeParent(tokenAddress);
+    ) external view returns (StakeLiquidityQuote memory quote) {
+        if (tokenAddress == address(0)) revert ZeroTokenAddress();
+        _checkDesiredAmounts(tokenAmountDesired, parentTokenAmountDesired);
         _checkMemberId(memberId);
         _checkPromisedWaitingPhases(promisedWaitingPhases);
-        HubPool memory pool = _hubPool(tokenAddress);
-        return _stakeQuote(
-            _quoteSingleToken(pool, WRAPPED_NATIVE_ADDRESS, inputNativeTokenAmount),
-            tokenAddress,
-            memberId,
-            promisedWaitingPhases
-        );
+        _checkRegisteredToken(tokenAddress);
+        _checkNativeParent(tokenAddress);
+        StakeContext memory context = _stakeContext(tokenAddress);
+        return _stakeQuote(context, tokenAmountDesired, parentTokenAmountDesired, memberId, promisedWaitingPhases);
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // validation
+    // ---------------------------------------------------------------------------------------------
 
     function _checkDeadline(uint256 deadline) private view {
         // A deadline is the caller's own upper bound on when the swap and the deposit may land; shifting
@@ -293,18 +356,16 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         if (block.timestamp > deadline) revert DeadlineExpired(block.timestamp, deadline);
     }
 
-    function _checkTokenInput(address tokenAddress, address inputTokenAddress, uint256 inputTokenAmount)
-        private
-        pure
-    {
-        if (tokenAddress == address(0)) revert ZeroTokenAddress();
-        if (inputTokenAddress == address(0)) revert ZeroInputTokenAddress();
-        if (inputTokenAmount == 0) revert ZeroInputTokenAmount();
+    /// @dev At least one side has to carry value; which side is the caller's choice. The single-token case
+    ///      is simply the other side being zero, so it needs no separate entry point.
+    function _checkDesiredAmounts(uint256 amountA, uint256 amountB) private pure {
+        if (amountA == 0 && amountB == 0) revert ZeroAmount();
     }
 
-    function _checkNativeInput(address tokenAddress, uint256 nativeTokenAmount) private pure {
-        if (tokenAddress == address(0)) revert ZeroTokenAddress();
-        if (nativeTokenAmount == 0) revert ZeroNativeTokenAmount();
+    function _checkTokenPair(address tokenA, address tokenB) private pure {
+        if (tokenA == address(0)) revert ZeroTokenAAddress();
+        if (tokenB == address(0)) revert ZeroTokenBAddress();
+        if (tokenA == tokenB) revert IdenticalTokens(tokenA);
     }
 
     function _checkMemberId(uint256 memberId) private view {
@@ -322,12 +383,6 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         if (parentTokenAddress != WRAPPED_NATIVE_ADDRESS) revert NativeInputUnsupported(parentTokenAddress);
     }
 
-    function _checkInputToken(HubPool memory pool, address inputTokenAddress) private pure {
-        if (inputTokenAddress != pool.tokenAddress && inputTokenAddress != pool.parentTokenAddress) {
-            revert InvalidInputTokenAddress(inputTokenAddress);
-        }
-    }
-
     function _checkPromisedWaitingPhases(uint256 promisedWaitingPhases) private view {
         uint256 minPhases = IStake(STAKE_ADDRESS).PROMISED_WAITING_PHASES_MIN();
         uint256 maxPhases = IStake(STAKE_ADDRESS).PROMISED_WAITING_PHASES_MAX();
@@ -340,196 +395,345 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         if (!ILaunch(LAUNCH_ADDRESS).isLOVE20Token(tokenAddress)) revert TokenNotRegistered(tokenAddress);
     }
 
-    function _hubPool(address tokenAddress) private view returns (HubPool memory pool) {
+    // ---------------------------------------------------------------------------------------------
+    // contexts
+    // ---------------------------------------------------------------------------------------------
+
+    /// @dev The staking path is scoped to one community: its pair is guaranteed by `Launch`, so a missing
+    ///      pair is a misconfiguration, not a cold start. Zero reserves are allowed (first liquidity).
+    function _stakeContext(address tokenAddress) private view returns (StakeContext memory context) {
         _checkRegisteredToken(tokenAddress);
 
-        pool.tokenAddress = tokenAddress;
-        pool.parentTokenAddress = ILOVE20Token(tokenAddress).PARENT_TOKEN_ADDRESS();
-        pool.balanceTokenBefore = IERC20(tokenAddress).balanceOf(address(this));
-        pool.balanceParentBefore = IERC20(pool.parentTokenAddress).balanceOf(address(this));
+        context.tokenAddress = tokenAddress;
+        context.parentTokenAddress = ILOVE20Token(tokenAddress).PARENT_TOKEN_ADDRESS();
+        context.balanceTokenBefore = IERC20(tokenAddress).balanceOf(address(this));
+        context.balanceParentBefore = IERC20(context.parentTokenAddress).balanceOf(address(this));
 
-        address pairAddress = IUniswapV2Factory(PAIR_FACTORY_ADDRESS).getPair(tokenAddress, pool.parentTokenAddress);
+        address pairAddress = IUniswapV2Factory(PAIR_FACTORY_ADDRESS).getPair(
+            tokenAddress, context.parentTokenAddress
+        );
         if (pairAddress == address(0)) revert PairMissing(tokenAddress);
-        pool.pairAddress = pairAddress;
+        context.pairAddress = pairAddress;
 
-        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
-        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
-        if (reserve0 == 0 && reserve1 == 0) revert PairEmpty(tokenAddress);
-
-        if (tokenAddress == pair.token0()) {
-            pool.reserveToken = uint256(reserve0);
-            pool.reserveParent = uint256(reserve1);
-        } else {
-            pool.reserveToken = uint256(reserve1);
-            pool.reserveParent = uint256(reserve0);
-        }
+        (uint256 reserveToken, uint256 reserveParent) = _reservesOf(pairAddress, tokenAddress);
+        context.reserveToken = reserveToken;
+        context.reserveParent = reserveParent;
+        context.hasLiquidity = reserveToken != 0 || reserveParent != 0;
     }
 
-    function _prepare(HubPool memory pool, address inputTokenAddress, uint256 inputTokenAmount, uint256 deadline)
+    /// @dev The LP path is generic: a missing pair is a legitimate cold start (the router creates it), so
+    ///      `hasLiquidity == false` covers both "no pair" and "pair with zero reserves".
+    function _pairContext(address tokenA, address tokenB) private view returns (HubPair memory pool) {
+        pool.tokenA = tokenA;
+        pool.tokenB = tokenB;
+        pool.balanceABefore = IERC20(tokenA).balanceOf(address(this));
+        pool.balanceBBefore = IERC20(tokenB).balanceOf(address(this));
+
+        address pairAddress = IUniswapV2Factory(PAIR_FACTORY_ADDRESS).getPair(tokenA, tokenB);
+        pool.pairAddress = pairAddress;
+        if (pairAddress == address(0)) return pool;
+
+        (uint256 reserveA, uint256 reserveB) = _reservesOf(pairAddress, tokenA);
+        pool.reserveA = reserveA;
+        pool.reserveB = reserveB;
+        pool.hasLiquidity = reserveA != 0 || reserveB != 0;
+    }
+
+    function _reservesOf(address pairAddress, address tokenA)
+        private
+        view
+        returns (uint256 reserveA, uint256 reserveB)
+    {
+        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
+        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
+        if (tokenA == pair.token0()) {
+            return (uint256(reserve0), uint256(reserve1));
+        }
+        return (uint256(reserve1), uint256(reserve0));
+    }
+
+    /// @dev The event root key for an LP fact. When the pair did not exist on entry the router created it
+    ///      during this call, so it is read back once. Only the first ever LP for a pair pays for this.
+    function _resolvedPairAddress(HubPair memory pool) private view returns (address pairAddress) {
+        if (pool.pairAddress != address(0)) return pool.pairAddress;
+        pairAddress = IUniswapV2Factory(PAIR_FACTORY_ADDRESS).getPair(pool.tokenA, pool.tokenB);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // preparation: swap the excess side so both sides match the pool ratio
+    // ---------------------------------------------------------------------------------------------
+
+    function _prepare(HubPair memory pool, uint256 amountADesired, uint256 amountBDesired, uint256 deadline)
         private
         returns (HubAmounts memory amounts)
     {
-        _checkInputToken(pool, inputTokenAddress);
-        _swapToBalance(pool, inputTokenAddress == pool.tokenAddress, inputTokenAmount, deadline);
+        _swapToBalance(pool, amountADesired, amountBDesired, deadline);
         return _readPrepared(pool);
     }
 
-    function _prepareNative(HubPool memory pool, uint256 deadline) private returns (HubAmounts memory) {
-        IWrappedNative(WRAPPED_NATIVE_ADDRESS).deposit{value: msg.value}();
-        _swapToBalance(pool, false, msg.value, deadline);
-        return _readPrepared(pool);
+    function _prepareStake(
+        StakeContext memory context,
+        uint256 tokenAmountDesired,
+        uint256 parentTokenAmountDesired,
+        uint256 deadline
+    ) private returns (HubAmounts memory amounts) {
+        _swapToBalanceStake(context, tokenAmountDesired, parentTokenAmountDesired, deadline);
+        return _readPreparedStake(context);
     }
 
     /// @dev `prepared` is a balance delta over the whole call: whatever core or the router does not pull
-    ///      stays on the Hub and is exactly the remainder. No propagation of core's conversion formula.
-    function _readPrepared(HubPool memory pool) private view returns (HubAmounts memory amounts) {
-        amounts.preparedTokenAmount = IERC20(pool.tokenAddress).balanceOf(address(this)) - pool.balanceTokenBefore;
-        amounts.preparedParentTokenAmount =
-            IERC20(pool.parentTokenAddress).balanceOf(address(this)) - pool.balanceParentBefore;
+    ///      stays on the Hub and is exactly the remainder.
+    function _readPrepared(HubPair memory pool) private view returns (HubAmounts memory amounts) {
+        amounts.preparedAmountA = IERC20(pool.tokenA).balanceOf(address(this)) - pool.balanceABefore;
+        amounts.preparedAmountB = IERC20(pool.tokenB).balanceOf(address(this)) - pool.balanceBBefore;
     }
 
-    /// @dev Reads the remainder and applies the caller's minimums as an endpoint check: what actually
-    ///      entered the stake or the pool is `prepared - remaining`, which is precisely the semantics of
-    ///      `tokenAmountMin` / `parentTokenAmountMin`. Sharing one implementation across all four entry
-    ///      points is what keeps the rule from drifting between the stake and the LP path.
-    function _settle(HubAmounts memory amounts, uint256 tokenAmountMin, uint256 parentAmountMin) private pure {
-        if (amounts.preparedTokenAmount - amounts.remainingTokenAmount < tokenAmountMin) {
-            revert InsufficientTokenAmount(
-                amounts.preparedTokenAmount - amounts.remainingTokenAmount, tokenAmountMin
-            );
-        }
-        if (amounts.preparedParentTokenAmount - amounts.remainingParentTokenAmount < parentAmountMin) {
-            revert InsufficientParentTokenAmount(
-                amounts.preparedParentTokenAmount - amounts.remainingParentTokenAmount, parentAmountMin
-            );
-        }
+    function _readPreparedStake(StakeContext memory context) private view returns (HubAmounts memory amounts) {
+        amounts.preparedAmountA =
+            IERC20(context.tokenAddress).balanceOf(address(this)) - context.balanceTokenBefore;
+        amounts.preparedAmountB =
+            IERC20(context.parentTokenAddress).balanceOf(address(this)) - context.balanceParentBefore;
     }
 
-    function _readRemainder(HubPool memory pool, HubAmounts memory amounts) private view {
-        amounts.remainingTokenAmount = IERC20(pool.tokenAddress).balanceOf(address(this)) - pool.balanceTokenBefore;
-        amounts.remainingParentTokenAmount =
-            IERC20(pool.parentTokenAddress).balanceOf(address(this)) - pool.balanceParentBefore;
+    function _readRemainder(HubPair memory pool, HubAmounts memory amounts) private view {
+        amounts.remainingAmountA = IERC20(pool.tokenA).balanceOf(address(this)) - pool.balanceABefore;
+        amounts.remainingAmountB = IERC20(pool.tokenB).balanceOf(address(this)) - pool.balanceBBefore;
     }
 
-    function _swapToBalance(HubPool memory pool, bool inputTokenIsToken, uint256 inputTokenAmount, uint256 deadline)
+    function _readRemainderStake(StakeContext memory context, HubAmounts memory amounts) private view {
+        amounts.remainingAmountA =
+            IERC20(context.tokenAddress).balanceOf(address(this)) - context.balanceTokenBefore;
+        amounts.remainingAmountB =
+            IERC20(context.parentTokenAddress).balanceOf(address(this)) - context.balanceParentBefore;
+    }
+
+    function _swapToBalance(HubPair memory pool, uint256 amountADesired, uint256 amountBDesired, uint256 deadline)
         private
     {
-        (uint256 amountToSwap, uint256 amountOutFromSwap) =
-            _swapPlan(pool.reserveToken, pool.reserveParent, inputTokenIsToken, inputTokenAmount);
+        if (!pool.hasLiquidity) return;
+        (bool swapAForB, uint256 amountToSwap) =
+            _swapPlan(pool.reserveA, pool.reserveB, amountADesired, amountBDesired);
+        _executeSwap(pool.tokenA, pool.tokenB, swapAForB, amountToSwap, deadline);
+    }
+
+    function _swapToBalanceStake(
+        StakeContext memory context,
+        uint256 tokenAmountDesired,
+        uint256 parentTokenAmountDesired,
+        uint256 deadline
+    ) private {
+        if (!context.hasLiquidity) return;
+        (bool swapTokenForParent, uint256 amountToSwap) =
+            _swapPlan(context.reserveToken, context.reserveParent, tokenAmountDesired, parentTokenAmountDesired);
+        _executeSwap(
+            context.tokenAddress, context.parentTokenAddress, swapTokenForParent, amountToSwap, deadline
+        );
+    }
+
+    function _executeSwap(
+        address tokenA,
+        address tokenB,
+        bool swapAForB,
+        uint256 amountToSwap,
+        uint256 deadline
+    ) private {
         if (amountToSwap == 0) return;
 
-        address tokenIn = inputTokenIsToken ? pool.tokenAddress : pool.parentTokenAddress;
-        address tokenOut = inputTokenIsToken ? pool.parentTokenAddress : pool.tokenAddress;
-
-        uint256 amountOutMin = (amountOutFromSwap * (PRECISION - SWAP_OUTPUT_TOLERANCE_RATIO)) / PRECISION;
-        if (amountOutMin == 0) amountOutMin = 1;
+        address tokenIn = swapAForB ? tokenA : tokenB;
+        address tokenOut = swapAForB ? tokenB : tokenA;
 
         address[] memory path = new address[](2);
         path[0] = tokenIn;
         path[1] = tokenOut;
 
         _approveToken(tokenIn, address(ROUTER_ADDRESS), amountToSwap);
-        ROUTER_ADDRESS.swapExactTokensForTokens(amountToSwap, amountOutMin, path, address(this), deadline);
+        // `amountOutMin = 1` only asserts a non-zero output. Price protection is the caller's endpoint
+        // minimum (`tokenAmountMin` / `amountAMin`), checked after the deposit against what actually
+        // entered; predicting the output here would duplicate the router's arithmetic and still not
+        // stop a sandwich that already moved the pool before this call.
+        ROUTER_ADDRESS.swapExactTokensForTokens(amountToSwap, 1, path, address(this), deadline);
         _approveToken(tokenIn, address(ROUTER_ADDRESS), 0);
     }
 
-    function _swapPlan(uint256 reserveToken, uint256 reserveParent, bool inputTokenIsToken, uint256 inputTokenAmount)
+    /// @dev Decides which side is in excess and by how much has to be swapped so both sides end up in the
+    ///      pool's ratio. A single-sided input is the special case where the other desired amount is zero.
+    function _swapPlan(uint256 reserveA, uint256 reserveB, uint256 amountADesired, uint256 amountBDesired)
         private
-        pure
-        returns (uint256 amountToSwap, uint256 amountOutFromSwap)
+        view
+        returns (bool swapAForB, uint256 amountToSwap)
     {
-        // A single input has to fit the pair's own reserve width: Uniswap V2 stores reserves in `uint112`,
-        // so a larger input could not be converted against them at all.
-        if (inputTokenAmount > UNISWAP_V2_MAX_RESERVE) {
-            revert AmountExceeded(inputTokenAmount, UNISWAP_V2_MAX_RESERVE);
+        if (amountADesired > UNISWAP_V2_MAX_RESERVE || amountBDesired > UNISWAP_V2_MAX_RESERVE) {
+            revert AmountExceeded(
+                amountADesired > amountBDesired ? amountADesired : amountBDesired, UNISWAP_V2_MAX_RESERVE
+            );
         }
-        if (inputTokenIsToken) {
-            amountToSwap = _amountToSwap(reserveToken, reserveParent, inputTokenAmount);
-            amountOutFromSwap = _amountOut(amountToSwap, reserveToken, reserveParent);
+        // A * reserveB >= reserveA * B means A is (weakly) the excess side.
+        if (amountADesired * reserveB >= reserveA * amountBDesired) {
+            swapAForB = true;
+            amountToSwap = _amountToSwap(reserveA, reserveB, amountADesired, amountBDesired);
         } else {
-            amountToSwap = _amountToSwap(reserveParent, reserveToken, inputTokenAmount);
-            amountOutFromSwap = _amountOut(amountToSwap, reserveParent, reserveToken);
+            swapAForB = false;
+            amountToSwap = _amountToSwap(reserveB, reserveA, amountBDesired, amountADesired);
         }
-        if (amountToSwap > 0 && amountOutFromSwap == 0) revert ZeroSwapOutput();
+        if (amountToSwap != 0 && amountToSwap > (swapAForB ? amountADesired : amountBDesired)) {
+            revert ZeroSwapOutput();
+        }
     }
 
-    /// @dev Closed form for "swap exactly enough to balance the pair afterwards", so a single input funds
-    ///      both sides. Solved from the constant-product invariant with the 997/1000 fee: the swap size
-    ///      that leaves the residual ratio equal to the pool ratio is the stable root below. Both
-    ///      reserves are non-zero by the time this runs (`_hubPool` rejects an empty pair), and the
-    ///      caller has already chosen the scarce side.
-    function _amountToSwap(uint256 reserveIn, uint256 reserveOut, uint256 amountIn)
+    /// @dev Closed form for "swap exactly enough to balance the pair afterwards", so a single input (or an
+    ///      unbalanced double input) funds both sides. Solved from the constant-product invariant with the
+    ///      fee `F/D`:
+    ///
+    ///        x = ( sqrt( r^2 * (F+D)^2 + 4*F*D*r*I/(rOut + b) ) - r*(F+D) ) / (2F)
+    ///
+    ///      where `I = a*rOut - r*b` and `b` is the other side's desired amount. With `b = 0` this reduces
+    ///      to the single-token solution; with `F/D = 997/1000` it reduces to the classic Uniswap V2 form.
+    ///
+    ///      The fee is stored as two 1e18 ratios (LP part and protocol part) because that is how a
+    ///      deployment is configured, but the arithmetic runs on the reduced integers: `F/D` is their
+    ///      complement in lowest terms. Doing it this way is exact — routing the 1e18 factor through the
+    ///      root would lose the low wei and can even underflow.
+    ///
+    ///      Overflow: `r^2*(F+D)^2` is the dominant term. At `r = uint112.max` it stays inside uint256 for
+    ///      `F+D <= 65536`, which the constructor enforces. The real profiles are 799..1997.
+    function _amountToSwap(uint256 reserveIn, uint256 reserveOut, uint256 amountIn, uint256 amountOutAlready)
         private
-        pure
+        view
         returns (uint256 amountToSwap)
     {
-        uint256 imbalance = amountIn * reserveOut;
-        return (
-            Math.sqrt(reserveIn * reserveIn * 3_988_009 + Math.mulDiv(reserveIn * 3_988_000, imbalance, reserveOut))
-                - reserveIn * 1_997
-        ) / 1_994;
+        if (reserveIn == 0 || reserveOut == 0) return 0;
+
+        uint256 imbalance = amountIn * reserveOut - reserveIn * amountOutAlready;
+        if (imbalance == 0) return 0;
+
+        (uint256 feeNumerator, uint256 feeDenominator) = _swapFeeFraction();
+        uint256 sum = feeNumerator + feeDenominator;
+
+        uint256 inner = reserveIn * reserveIn * sum * sum
+            + (4 * feeNumerator * feeDenominator * reserveIn * imbalance) / (reserveOut + amountOutAlready);
+
+        return (Math.sqrt(inner) - reserveIn * sum) / (2 * feeNumerator);
     }
 
-    function _amountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut)
-        private
-        pure
-        returns (uint256 amountOut)
-    {
-        if (amountIn == 0 || reserveIn == 0 || reserveOut == 0) return 0;
-        uint256 amountInWithFee = amountIn * 997;
-        return (amountInWithFee * reserveOut) / (reserveIn * 1000 + amountInWithFee);
+    /// @dev The swap fee `F/D` in lowest terms. The two configured ratios sum to the fee the pair charges;
+    ///      `F = D - (lp + proto)` and `D = 1e18` reduce to small integers for every real profile
+    ///      (`997/1000`, `399/400`, `499/500`), which is what keeps the closed form exact and bounded.
+    function _swapFeeFraction() private view returns (uint256 feeNumerator, uint256 feeDenominator) {
+        feeDenominator = PRECISION;
+        feeNumerator = PRECISION - SWAP_FEE_FOR_LP_RATIO - SWAP_FEE_FOR_PROTOCOL_RATIO;
+        uint256 divisor = _gcd(feeNumerator, feeDenominator);
+        return (feeNumerator / divisor, feeDenominator / divisor);
+    }
+
+    /// @dev The protocol's cut of the growth in sqrt(k), as `k/a` in lowest terms. Zero when the DEX has its
+    ///      protocol fee permanently off, which makes the whole `_mintFee` branch a no-op.
+    function _protocolFeeFraction() private view returns (uint256 feeNumerator, uint256 feeDenominator) {
+        uint256 protocolRatio = SWAP_FEE_FOR_PROTOCOL_RATIO;
+        if (protocolRatio == 0) return (0, 1);
+        uint256 divisor = _gcd(protocolRatio, SWAP_FEE_FOR_LP_RATIO);
+        return (protocolRatio / divisor, SWAP_FEE_FOR_LP_RATIO / divisor);
+    }
+
+    function _gcd(uint256 a, uint256 b) private pure returns (uint256) {
+        while (b != 0) {
+            (a, b) = (b, a % b);
+        }
+        return a;
+    }
+
+    /// @dev `F + D` after reducing `F/D` to lowest terms, which is the bound the closed form needs.
+    function _swapFeeSumBound(uint256 swapFeeRatio) private pure returns (uint256) {
+        uint256 divisor = _gcd(swapFeeRatio, PRECISION);
+        return swapFeeRatio / divisor + PRECISION / divisor;
     }
 
     function _optimalAmounts(
-        uint256 reserveToken,
-        uint256 reserveParent,
-        uint256 tokenAmountDesired,
-        uint256 parentTokenAmountDesired
-    ) private pure returns (uint256 tokenAmount, uint256 parentTokenAmount) {
-        uint256 parentTokenAmountOptimal = (tokenAmountDesired * reserveParent) / reserveToken;
-        if (parentTokenAmountOptimal <= parentTokenAmountDesired) {
-            return (tokenAmountDesired, parentTokenAmountOptimal);
+        uint256 reserveA,
+        uint256 reserveB,
+        uint256 amountADesired,
+        uint256 amountBDesired
+    ) private pure returns (uint256 amountA, uint256 amountB) {
+        uint256 amountBOptimal = (amountADesired * reserveB) / reserveA;
+        if (amountBOptimal <= amountBDesired) {
+            return (amountADesired, amountBOptimal);
         }
-        uint256 tokenAmountOptimal = (parentTokenAmountDesired * reserveToken) / reserveParent;
-        return (tokenAmountOptimal, parentTokenAmountDesired);
+        uint256 amountAOptimal = (amountBDesired * reserveA) / reserveB;
+        return (amountAOptimal, amountBDesired);
     }
 
     function _liquidityMinted(
-        uint256 reserveToken,
-        uint256 reserveParent,
+        uint256 reserveA,
+        uint256 reserveB,
         uint256 totalSupply,
-        uint256 tokenAmount,
-        uint256 parentTokenAmount
+        uint256 amountA,
+        uint256 amountB
     ) private pure returns (uint256 liquidity) {
         if (totalSupply == 0) {
-            return Math.sqrt(tokenAmount * parentTokenAmount) - UNISWAP_V2_MINIMUM_LIQUIDITY;
+            return Math.sqrt(amountA * amountB) - UNISWAP_V2_MINIMUM_LIQUIDITY;
         }
-        liquidity = Math.min(
-            (tokenAmount * totalSupply) / reserveToken, (parentTokenAmount * totalSupply) / reserveParent
-        );
+        liquidity =
+            Math.min((amountA * totalSupply) / reserveA, (amountB * totalSupply) / reserveB);
     }
 
-    function _totalSupplyAfterFeeMint(HubPool memory pool, uint256 reserveToken, uint256 reserveParent)
+    /// @dev `totalSupply` after the pair's own `_mintFee`. The protocol takes a configured share of the
+    ///      growth in sqrt(k) and mints it as LP, so the caller's proportional share is smaller than it
+    ///      would otherwise be. Written with `k/a` in lowest terms:
+    ///
+    ///        feeLp = supply * (rootK - rootKLast) * k / (a * rootK + k * rootKLast)
+    ///
+    ///      which is exactly Uniswap V2's `supply*(rootK-rootKLast)/(5*rootK+rootKLast)` when `k/a = 1/5`,
+    ///      and Pancake mainnet's `8/(17r+8rLast)` when `k/a = 8/17`. A zero `k` means the DEX takes no
+    ///      protocol fee at all, and the branch returns `totalSupply` untouched.
+    function _totalSupplyAfterFeeMint(HubPair memory pool, uint256 reserveA, uint256 reserveB)
         private
         view
         returns (uint256 totalSupply)
     {
         totalSupply = IUniswapV2Pair(pool.pairAddress).totalSupply();
 
-        if (IUniswapV2Factory(PAIR_FACTORY_ADDRESS).feeTo() == address(0)) return totalSupply;
+        (uint256 feeNumerator, uint256 feeDenominator) = _protocolFeeFraction();
+        if (feeNumerator == 0) return totalSupply;
 
         uint256 kLast = IUniswapV2Pair(pool.pairAddress).kLast();
         if (kLast == 0) return totalSupply;
 
-        uint256 rootK = Math.sqrt(reserveToken * reserveParent);
+        uint256 rootK = Math.sqrt(reserveA * reserveB);
         uint256 rootKLast = Math.sqrt(kLast);
         if (rootK <= rootKLast) return totalSupply;
 
-        return totalSupply + (totalSupply * (rootK - rootKLast)) / (rootK * 5 + rootKLast);
+        uint256 numerator = totalSupply * (rootK - rootKLast) * feeNumerator;
+        uint256 denominator = feeDenominator * rootK + feeNumerator * rootKLast;
+        return totalSupply + numerator / denominator;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // staking
+    // ---------------------------------------------------------------------------------------------
+
+    /// @dev Reads the remainder and applies the caller's minimums as an endpoint check: what actually
+    ///      entered the stake or the pool is `prepared - remaining`, which is precisely the semantics of
+    ///      `tokenAmountMin` / `parentTokenAmountMin`. Sharing one implementation across the staking and
+    ///      the LP path is what keeps the rule from drifting between them.
+    function _settle(
+        HubAmounts memory amounts,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        bool staking
+    ) private pure {
+        uint256 enteredA = amounts.preparedAmountA - amounts.remainingAmountA;
+        uint256 enteredB = amounts.preparedAmountB - amounts.remainingAmountB;
+        if (enteredA < amountAMin) {
+            if (staking) revert InsufficientTokenAmount(enteredA, amountAMin);
+            revert InsufficientAmountA(enteredA, amountAMin);
+        }
+        if (enteredB < amountBMin) {
+            if (staking) revert InsufficientParentTokenAmount(enteredB, amountBMin);
+            revert InsufficientAmountB(enteredB, amountBMin);
+        }
     }
 
     function _stake(
-        HubPool memory pool,
+        StakeContext memory context,
         HubAmounts memory amounts,
         uint256 promisedWaitingPhases,
         uint256 memberId,
@@ -537,150 +741,232 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         uint256 parentAmountMin
     ) private returns (uint256 govVotesAdded, uint256 liquiditySharesAdded) {
         address stakeAddress = STAKE_ADDRESS;
-        _approveToken(pool.tokenAddress, stakeAddress, amounts.preparedTokenAmount);
-        _approveToken(pool.parentTokenAddress, stakeAddress, amounts.preparedParentTokenAmount);
+        _approveToken(context.tokenAddress, stakeAddress, amounts.preparedAmountA);
+        _approveToken(context.parentTokenAddress, stakeAddress, amounts.preparedAmountB);
 
         (govVotesAdded, liquiditySharesAdded) = IStake(stakeAddress).stakeLiquidity(
-            pool.tokenAddress,
-            amounts.preparedTokenAmount,
-            amounts.preparedParentTokenAmount,
+            context.tokenAddress,
+            amounts.preparedAmountA,
+            amounts.preparedAmountB,
             promisedWaitingPhases,
             memberId
         );
 
-        _approveToken(pool.tokenAddress, stakeAddress, 0);
-        _approveToken(pool.parentTokenAddress, stakeAddress, 0);
-        _readRemainder(pool, amounts);
-        _settle(amounts, tokenAmountMin, parentAmountMin);
+        _approveToken(context.tokenAddress, stakeAddress, 0);
+        _approveToken(context.parentTokenAddress, stakeAddress, 0);
+        _readRemainderStake(context, amounts);
+        _settle(amounts, tokenAmountMin, parentAmountMin, true);
     }
 
     function _addLiquidity(
-        HubPool memory pool,
+        HubPair memory pool,
         HubAmounts memory amounts,
         address to,
         uint256 deadline,
-        uint256 tokenAmountMin,
-        uint256 parentAmountMin
+        uint256 amountAMin,
+        uint256 amountBMin
     ) private returns (uint256 liquidity) {
-        address tokenAddress = pool.tokenAddress;
-        address parentTokenAddress = pool.parentTokenAddress;
+        address tokenA = pool.tokenA;
+        address tokenB = pool.tokenB;
         address routerAddress = address(ROUTER_ADDRESS);
 
-        _approveToken(tokenAddress, routerAddress, amounts.preparedTokenAmount);
-        _approveToken(parentTokenAddress, routerAddress, amounts.preparedParentTokenAmount);
+        _approveToken(tokenA, routerAddress, amounts.preparedAmountA);
+        _approveToken(tokenB, routerAddress, amounts.preparedAmountB);
 
         // The pool-level minimums stay at zero. The caller's minimums are endpoint amounts for the whole
-        // chain (`prepared - remaining`), and `_settle` is their single implementation for both the stake
-        // and the LP path; passing them down as `amountAMin`/`amountBMin` would put the same rule in two
-        // places and surface a router-specific revert instead of a Hub error.
+        // chain (`prepared - remaining`), and `_settle` is their single implementation for both paths;
+        // passing them down as `amountAMin`/`amountBMin` would put the same rule in two places and surface
+        // a router-specific revert instead of a Hub error.
         (,, liquidity) = ROUTER_ADDRESS.addLiquidity(
-            tokenAddress,
-            parentTokenAddress,
-            amounts.preparedTokenAmount,
-            amounts.preparedParentTokenAmount,
-            0,
-            0,
-            to,
-            deadline
+            tokenA, tokenB, amounts.preparedAmountA, amounts.preparedAmountB, 0, 0, to, deadline
         );
 
-        _approveToken(tokenAddress, routerAddress, 0);
-        _approveToken(parentTokenAddress, routerAddress, 0);
+        _approveToken(tokenA, routerAddress, 0);
+        _approveToken(tokenB, routerAddress, 0);
         _readRemainder(pool, amounts);
-        _settle(amounts, tokenAmountMin, parentAmountMin);
+        _settle(amounts, amountAMin, amountBMin, false);
     }
 
-    function _quoteSingleToken(HubPool memory pool, address inputTokenAddress, uint256 inputTokenAmount)
+    // ---------------------------------------------------------------------------------------------
+    // quotes
+    // ---------------------------------------------------------------------------------------------
+
+    function _quoteLp(HubPair memory pool, uint256 amountADesired, uint256 amountBDesired)
         private
         view
-        returns (SingleTokenLpQuote memory quote)
+        returns (LpQuote memory quote)
     {
-        _checkInputToken(pool, inputTokenAddress);
+        quote.hasLiquidity = pool.hasLiquidity;
 
-        bool inputTokenIsToken = inputTokenAddress == pool.tokenAddress;
-        (uint256 amountToSwap, uint256 amountOutFromSwap) =
-            _swapPlan(pool.reserveToken, pool.reserveParent, inputTokenIsToken, inputTokenAmount);
-
-        quote.amountToSwap = amountToSwap;
-        quote.amountOutFromSwap = amountOutFromSwap;
-        if (amountToSwap > 0) {
-            quote.willSwap = true;
-            quote.swapTokenIn = inputTokenIsToken ? pool.tokenAddress : pool.parentTokenAddress;
-            quote.swapTokenOut = inputTokenIsToken ? pool.parentTokenAddress : pool.tokenAddress;
+        // No reserves: the whole deposit goes in untouched, so the quote is the input itself. The router
+        // creates the pair when it is missing, so this is the cold-start branch of both "no pair" and
+        // "pair with zero reserves".
+        if (!pool.hasLiquidity) {
+            if (amountADesired == 0 || amountBDesired == 0) {
+                revert PairWithoutLiquidity(pool.tokenA, pool.tokenB);
+            }
+            quote.preparedAmountA = amountADesired;
+            quote.preparedAmountB = amountBDesired;
+            quote.usableAmountA = amountADesired;
+            quote.usableAmountB = amountBDesired;
+            quote.expectedLiquidity =
+                Math.sqrt(amountADesired * amountBDesired) - UNISWAP_V2_MINIMUM_LIQUIDITY;
+            quote.suggestedAmountAMin = amountADesired;
+            quote.suggestedAmountBMin = amountBDesired;
+            return quote;
         }
 
-        quote.preparedTokenAmount = inputTokenIsToken ? inputTokenAmount - amountToSwap : amountOutFromSwap;
-        quote.preparedParentTokenAmount = inputTokenIsToken ? amountOutFromSwap : inputTokenAmount - amountToSwap;
+        (bool swapAForB, uint256 amountToSwap) =
+            _swapPlan(pool.reserveA, pool.reserveB, amountADesired, amountBDesired);
 
-        (uint256 reserveToken, uint256 reserveParent) = inputTokenIsToken
-            ? (pool.reserveToken + amountToSwap, pool.reserveParent - amountOutFromSwap)
-            : (pool.reserveToken - amountOutFromSwap, pool.reserveParent + amountToSwap);
+        uint256 reserveAAfter = pool.reserveA;
+        uint256 reserveBAfter = pool.reserveB;
+        uint256 preparedA = amountADesired;
+        uint256 preparedB = amountBDesired;
 
-        // Both prepared amounts are non-zero here: `_swapPlan` already rejected a zero swap output, and the
-        // side the caller supplied keeps whatever the swap did not consume. So the conversion always has
-        // two positive inputs to work with and its result is positive on both sides.
-        (uint256 tokenAmountUsed, uint256 parentAmountUsed) = _optimalAmounts(
-            reserveToken, reserveParent, quote.preparedTokenAmount, quote.preparedParentTokenAmount
-        );
+        if (amountToSwap > 0) {
+            quote.willSwap = true;
+            quote.amountToSwap = amountToSwap;
+            quote.swapTokenIn = swapAForB ? pool.tokenA : pool.tokenB;
+            quote.swapTokenOut = swapAForB ? pool.tokenB : pool.tokenA;
 
-        quote.usableTokenAmount = tokenAmountUsed;
-        quote.usableParentTokenAmount = parentAmountUsed;
+            // The router is the authority on the output: asking it keeps the quote and the write equal to
+            // the wei even if the configured fee ratios are slightly off for this deployment.
+            uint256 amountOut = _routerAmountOut(quote.swapTokenIn, quote.swapTokenOut, amountToSwap);
+            if (amountOut == 0) revert ZeroSwapOutput();
+            quote.amountOutFromSwap = amountOut;
 
-        uint256 totalSupplyAfterFeeMint =
-            _totalSupplyAfterFeeMint(pool, reserveToken, reserveParent);
+            if (swapAForB) {
+                preparedA = amountADesired - amountToSwap;
+                preparedB = amountBDesired + amountOut;
+                reserveAAfter = pool.reserveA + amountToSwap;
+                reserveBAfter = pool.reserveB - amountOut;
+            } else {
+                preparedA = amountADesired + amountOut;
+                preparedB = amountBDesired - amountToSwap;
+                reserveAAfter = pool.reserveA - amountOut;
+                reserveBAfter = pool.reserveB + amountToSwap;
+            }
+        }
+
+        quote.preparedAmountA = preparedA;
+        quote.preparedAmountB = preparedB;
+
+        (uint256 usableA, uint256 usableB) =
+            _optimalAmounts(reserveAAfter, reserveBAfter, preparedA, preparedB);
+        quote.usableAmountA = usableA;
+        quote.usableAmountB = usableB;
+        quote.suggestedAmountAMin = usableA;
+        quote.suggestedAmountBMin = usableB;
+
+        uint256 totalSupplyAfterFeeMint = _totalSupplyAfterFeeMint(pool, reserveAAfter, reserveBAfter);
         quote.expectedLiquidity =
-            _liquidityMinted(reserveToken, reserveParent, totalSupplyAfterFeeMint, tokenAmountUsed, parentAmountUsed);
+            _liquidityMinted(reserveAAfter, reserveBAfter, totalSupplyAfterFeeMint, usableA, usableB);
     }
 
     function _stakeQuote(
-        SingleTokenLpQuote memory quote,
-        address tokenAddress,
+        StakeContext memory context,
+        uint256 tokenAmountDesired,
+        uint256 parentTokenAmountDesired,
         uint256 memberId,
         uint256 promisedWaitingPhases
-    ) private view returns (SingleTokenStakeLiquidityQuote memory stakeQuote) {
-        stakeQuote.willSwap = quote.willSwap;
-        stakeQuote.swapTokenIn = quote.swapTokenIn;
-        stakeQuote.swapTokenOut = quote.swapTokenOut;
-        stakeQuote.amountToSwap = quote.amountToSwap;
-        stakeQuote.amountOutFromSwap = quote.amountOutFromSwap;
-        stakeQuote.preparedTokenAmount = quote.preparedTokenAmount;
-        stakeQuote.preparedParentTokenAmount = quote.preparedParentTokenAmount;
-        stakeQuote.usableTokenAmount = quote.usableTokenAmount;
-        stakeQuote.usableParentTokenAmount = quote.usableParentTokenAmount;
-        stakeQuote.suggestedTokenAmountMin = quote.usableTokenAmount;
-        stakeQuote.suggestedParentTokenAmountMin = quote.usableParentTokenAmount;
+    ) private view returns (StakeLiquidityQuote memory quote) {
+        LpQuote memory lpQuote = _stakeLpQuote(context, tokenAmountDesired, parentTokenAmountDesired);
 
-        (uint256 totalLiquidityShares, , uint256 withdrawableLp, , , , , ) = IStake(STAKE_ADDRESS).totalStake(tokenAddress);
+        quote.hasLiquidity = lpQuote.hasLiquidity;
+        quote.willSwap = lpQuote.willSwap;
+        quote.swapTokenIn = lpQuote.swapTokenIn;
+        quote.swapTokenOut = lpQuote.swapTokenOut;
+        quote.amountToSwap = lpQuote.amountToSwap;
+        quote.amountOutFromSwap = lpQuote.amountOutFromSwap;
+        quote.preparedTokenAmount = lpQuote.preparedAmountA;
+        quote.preparedParentTokenAmount = lpQuote.preparedAmountB;
+        quote.usableTokenAmount = lpQuote.usableAmountA;
+        quote.usableParentTokenAmount = lpQuote.usableAmountB;
+        quote.expectedLiquidity = lpQuote.expectedLiquidity;
+        quote.suggestedTokenAmountMin = lpQuote.suggestedAmountAMin;
+        quote.suggestedParentAmountMin = lpQuote.suggestedAmountBMin;
+
+        (uint256 totalLiquidityShares, , uint256 withdrawableLp, , , , , ) =
+            IStake(STAKE_ADDRESS).totalStake(context.tokenAddress);
         (uint256 memberLiquidityShares, , uint256 currentPromisedWaitingPhases, , , , ) =
-            IStake(STAKE_ADDRESS).memberStake(tokenAddress, memberId);
+            IStake(STAKE_ADDRESS).memberStake(context.tokenAddress, memberId);
 
-        stakeQuote.liquiditySharesAdded = totalLiquidityShares == 0 || withdrawableLp == 0
+        quote.liquiditySharesAdded = totalLiquidityShares == 0 || withdrawableLp == 0
             ? quote.expectedLiquidity
             : (totalLiquidityShares * quote.expectedLiquidity) / withdrawableLp;
-        stakeQuote.liquidityShares = memberLiquidityShares + stakeQuote.liquiditySharesAdded;
-        stakeQuote.govVotesAdded =
-            stakeQuote.liquidityShares * promisedWaitingPhases - memberLiquidityShares * currentPromisedWaitingPhases;
+        quote.liquidityShares = memberLiquidityShares + quote.liquiditySharesAdded;
+        quote.govVotesAdded = quote.liquidityShares * promisedWaitingPhases
+            - memberLiquidityShares * currentPromisedWaitingPhases;
+    }
+
+    /// @dev The staking side of `_quoteLp`: same maths, but the pair is the community's and the two sides
+    ///      are named token / parent.
+    function _stakeLpQuote(
+        StakeContext memory context,
+        uint256 tokenAmountDesired,
+        uint256 parentTokenAmountDesired
+    ) private view returns (LpQuote memory quote) {
+        HubPair memory pool = HubPair({
+            tokenA: context.tokenAddress,
+            tokenB: context.parentTokenAddress,
+            pairAddress: context.pairAddress,
+            hasLiquidity: context.hasLiquidity,
+            balanceABefore: 0,
+            balanceBBefore: 0,
+            reserveA: context.reserveToken,
+            reserveB: context.reserveParent
+        });
+        // The staking path requires an existing pair, but zero reserves are legal: `_quoteLp` treats them
+        // as the cold-start branch, which is exactly what `Stake.stakeLiquidity` does with its own
+        // `_optimalAmounts` when both reserves are zero.
+        if (!context.hasLiquidity) {
+            if (tokenAmountDesired == 0 || parentTokenAmountDesired == 0) {
+                revert PairWithoutLiquidity(context.tokenAddress, context.parentTokenAddress);
+            }
+            quote.preparedAmountA = tokenAmountDesired;
+            quote.preparedAmountB = parentTokenAmountDesired;
+            quote.usableAmountA = tokenAmountDesired;
+            quote.usableAmountB = parentTokenAmountDesired;
+            quote.expectedLiquidity =
+                Math.sqrt(tokenAmountDesired * parentTokenAmountDesired) - UNISWAP_V2_MINIMUM_LIQUIDITY;
+            quote.suggestedAmountAMin = tokenAmountDesired;
+            quote.suggestedAmountBMin = parentTokenAmountDesired;
+            return quote;
+        }
+        return _quoteLp(pool, tokenAmountDesired, parentTokenAmountDesired);
+    }
+
+    function _routerAmountOut(address tokenIn, address tokenOut, uint256 amountIn)
+        private
+        view
+        returns (uint256 amountOut)
+    {
+        address[] memory path = new address[](2);
+        path[0] = tokenIn;
+        path[1] = tokenOut;
+        return ROUTER_ADDRESS.getAmountsOut(amountIn, path)[1];
     }
 
     function _approveToken(address tokenAddress, address spender, uint256 amount) private {
         IERC20(tokenAddress).forceApprove(spender, amount);
     }
 
-    function _refundTokens(HubPool memory pool, HubAmounts memory amounts) private {
-        _refundToken(pool.tokenAddress, amounts.remainingTokenAmount);
-        _refundToken(pool.parentTokenAddress, amounts.remainingParentTokenAmount);
+    function _refundTokens(address tokenA, address tokenB, HubAmounts memory amounts) private {
+        _refundToken(tokenA, amounts.remainingAmountA);
+        _refundToken(tokenB, amounts.remainingAmountB);
     }
 
     /// @dev The native branch returns the wrapped-native remainder as native currency: the shape of the
     ///      refund is decided by the function the caller used, never by an argument.
-    function _refundNativeThenTokens(HubPool memory pool, HubAmounts memory amounts) private {
-        if (amounts.remainingParentTokenAmount > 0) {
-            IWrappedNative(WRAPPED_NATIVE_ADDRESS).withdraw(amounts.remainingParentTokenAmount);
+    function _refundNativeThenToken(address tokenAddress, HubAmounts memory amounts) private {
+        if (amounts.remainingAmountB > 0) {
+            IWrappedNative(WRAPPED_NATIVE_ADDRESS).withdraw(amounts.remainingAmountB);
             // forge-lint: disable-next-line(arbitrary-send-eth)
-            (bool success,) = msg.sender.call{value: amounts.remainingParentTokenAmount}("");
+            (bool success,) = msg.sender.call{value: amounts.remainingAmountB}("");
             if (!success) revert NativeRefundFailed();
         }
-        _refundToken(pool.tokenAddress, amounts.remainingTokenAmount);
+        _refundToken(tokenAddress, amounts.remainingAmountA);
     }
 
     function _refundToken(address tokenAddress, uint256 amount) private {

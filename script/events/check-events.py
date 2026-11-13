@@ -22,7 +22,7 @@ used with an existing out/ directory.
 
 # Everything outside the FAMILIES table is byte-identical across the business repositories;
 # the table itself is a per-repo slice of matt-gov/docs/event-standards.md §6.1, and for this
-# repository it holds exactly one family: periphery.hub.
+# repository it holds two families: periphery.hub and periphery.pair.
 
 import json
 import re
@@ -35,13 +35,17 @@ EVENTS_DIR = Path(__file__).resolve().parent
 REPO = EVENTS_DIR.parent.parent
 
 # Family slot rules from matt-gov/docs/event-standards.md §6.1, this repo's families only.
-# periphery.hub: root key is the community `tokenAddress`; there is no `round` field in this layer, so
-# `round_after` is empty. The second indexed slot is `memberId` on the stake facts and the recipient
-# `to` on the LP facts (an LP adds no stake bookkeeping), and the third is always `caller`.
+# There is no `round` field in this layer, so every `round_after` is empty.
+#   periphery.hub:  root key is the community `tokenAddress`; second indexed slot is `memberId`
+#   periphery.pair: root key is the `pairAddress`; second indexed slot is the recipient `to`
+# Both carry `caller` in the third indexed slot. Splitting by root key is deliberate: a single family
+# accepting "tokenAddress or pairAddress" would let a staking event be emitted with the wrong root and
+# still pass.
 #   root: allowed first field names; empty means the emitter itself is the root key.
 #   round_after: `round` must follow at least one of these fields when present.
 FAMILIES = {
     "periphery.hub": {"root": ("tokenAddress",), "round_after": ()},
+    "periphery.pair": {"root": ("pairAddress",), "round_after": ()},
 }
 
 # Standard token events inherited from OZ are outside the spec (see §9) and carry no family.

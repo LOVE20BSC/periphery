@@ -6,26 +6,49 @@ import {console2} from "@forge-std/console2.sol";
 import {IStake} from "@core/interfaces/IStake.sol";
 import {ILaunch} from "@core/interfaces/ILaunch.sol";
 import {IMemberNFT} from "@core/interfaces/IMemberNFT.sol";
+import {IUniswapV2Factory} from "../../src/interfaces/IUniswapV2Factory.sol";
+import {IUniswapV2Pair} from "../../src/interfaces/IUniswapV2Pair.sol";
 import {IUniswapV2Router02} from "../../src/interfaces/IUniswapV2Router02.sol";
 import {LOVE20Hub} from "../../src/LOVE20Hub.sol";
 
+/// @dev Deployment gate for `LOVE20Hub`.
+///
+///      The Hub takes one injected dependency (`Stake`) and derives the rest, so a wrong `Stake` is the
+///      only way to deploy a wrong Hub — that is what the address-book cross-check rules out.
+///
+///      On top of that, the two fee ratios are deployment inputs, and getting them wrong is silent: the
+///      Hub would still work, but its swap sizing and its LP projection would be off for that DEX. So
+///      before broadcasting, this script re-derives the swap fee from the DEX itself by asking the router
+///      for a real quote and inverting `getAmountOut`:
+///
+///        y = x*F*rOut / (rIn*D + x*F)   =>   F/D = y*rIn / (x*(rOut - y))
+///
+///      A mismatch aborts the run and prints both values. The ratios themselves come from `hub.params`
+///      (auditable, reproducible, independent of whether the chain has a funded pool at deploy time); the
+///      probe only cross-checks them.
 contract DeployHub is Script {
     struct HubConfig {
         uint256 chainId;
         address stake;
+        uint256 swapFeeForLpRatio;
+        uint256 swapFeeForProtocolRatio;
         address expectedRouter;
         address expectedPairFactory;
         address expectedLaunch;
         address expectedMemberNFT;
         address expectedWrappedNative;
+        /// @dev A pair with non-zero reserves used to cross-check the configured swap fee. Optional: when
+        ///      zero the probe is skipped (a fresh chain has no funded pool to ask).
+        address probeToken;
     }
 
     function run() external returns (address hubAddress) {
         HubConfig memory config = _loadConfig();
         _validateConfig(config);
+        _validateFeeRatiosAgainstTheDex(config);
 
         vm.startBroadcast();
-        LOVE20Hub hub = new LOVE20Hub(config.stake);
+        LOVE20Hub hub = new LOVE20Hub(config.stake, config.swapFeeForLpRatio, config.swapFeeForProtocolRatio);
         vm.stopBroadcast();
 
         _validateDeployment(config, hub);
@@ -36,20 +59,32 @@ contract DeployHub is Script {
     function _loadConfig() internal view returns (HubConfig memory config) {
         config.chainId = vm.envUint("CHAIN_ID");
         config.stake = vm.envAddress("STAKE_ADDRESS");
+        config.swapFeeForLpRatio = vm.envUint("SWAP_FEE_FOR_LP_RATIO");
+        config.swapFeeForProtocolRatio = vm.envUint("SWAP_FEE_FOR_PROTOCOL_RATIO");
         config.expectedRouter = vm.envAddress("ROUTER_ADDRESS");
         config.expectedPairFactory = vm.envAddress("PAIR_FACTORY_ADDRESS");
         config.expectedLaunch = vm.envAddress("LAUNCH_ADDRESS");
         config.expectedMemberNFT = vm.envAddress("MEMBER_NFT_ADDRESS");
         config.expectedWrappedNative = vm.envAddress("WRAPPED_NATIVE_ADDRESS");
+        // `hub.params` always defines the key, so an unused probe arrives as an empty string rather than
+        // as an unset variable. Both shapes mean "skip the cross-check".
+        string memory probeTokenValue = vm.envString("SWAP_FEE_PROBE_TOKEN");
+        config.probeToken = bytes(probeTokenValue).length == 0 ? address(0) : vm.envAddress("SWAP_FEE_PROBE_TOKEN");
     }
 
-    /// @dev Runs entirely before `startBroadcast()`. The Hub takes one address and derives the rest, so the
-    ///      only way a wrong deployment can happen is through a wrong `Stake` — which is exactly what this
-    ///      gate rules out: every derived value is re-read from `Stake` and from the router, code-checked,
-    ///      and compared against the address book core wrote before this run.
+    /// @dev Runs entirely before `startBroadcast()`. Every derived value is re-read from `Stake` and from
+    ///      the router, code-checked, and compared against the address book core wrote before this run.
     function _validateConfig(HubConfig memory config) internal view {
         require(block.chainid == config.chainId, "Chain ID mismatch");
         require(config.stake.code.length != 0, "Stake must be a deployed contract");
+
+        // The same bounds the constructor enforces, checked here so a bad parameter file fails with a
+        // readable message instead of a bare revert from the constructor.
+        require(config.swapFeeForLpRatio > 0, "SWAP_FEE_FOR_LP_RATIO must be non-zero");
+        require(
+            config.swapFeeForLpRatio + config.swapFeeForProtocolRatio < 1e18,
+            "swap fee ratios must sum to less than 1e18"
+        );
 
         IStake stake = IStake(config.stake);
         address routerAddress = stake.ROUTER_ADDRESS();
@@ -92,6 +127,76 @@ contract DeployHub is Script {
         );
     }
 
+    /// @dev Cross-checks the configured swap fee against what the DEX actually charges, by inverting one
+    ///      real `getAmountsOut` quote. Skipped when no probe token is configured.
+    function _validateFeeRatiosAgainstTheDex(HubConfig memory config) internal view {
+        address probeToken = config.probeToken;
+        if (probeToken == address(0)) {
+            console2.log("SWAP_FEE_PROBE_TOKEN unset; skipping the on-chain fee cross-check");
+            return;
+        }
+
+        IUniswapV2Router02 router = IUniswapV2Router02(config.expectedRouter);
+        address[] memory path = new address[](2);
+        path[0] = probeToken;
+        path[1] = config.expectedWrappedNative;
+
+        address pairAddress = IUniswapV2Factory(config.expectedPairFactory).getPair(
+            probeToken, config.expectedWrappedNative
+        );
+        require(pairAddress != address(0), "Probe pair missing; cannot cross-check the swap fee");
+
+        (uint256 reserveIn, uint256 reserveOut) = _reservesOf(pairAddress, probeToken);
+        require(reserveIn > 0 && reserveOut > 0, "Probe pair has no reserves; cannot cross-check the swap fee");
+
+        // A quote at 1/1000 of the reserve keeps the output large enough that the inversion is exact.
+        uint256 probeIn = reserveIn / 1000;
+        require(probeIn > 0, "Probe pair too shallow to cross-check the swap fee");
+
+        uint256 probeOut = router.getAmountsOut(probeIn, path)[1];
+        require(probeOut > 0 && probeOut < reserveOut, "Probe quote unusable");
+
+        // F/D = y*rIn / (x*(rOut - y)); compare the configured ratio against it after cross-multiplying so
+        // the comparison stays integral.
+        uint256 configuredFee = 1e18 - config.swapFeeForLpRatio - config.swapFeeForProtocolRatio;
+        // The probe size is deliberately a fraction of the reserve so the quote stays large; the ratio is
+        // then compared by cross-multiplication, which keeps the comparison integral. `probeIn` is a
+        // division result, so both sides are scaled the same way — the scaling cancels in the comparison
+        // and no precision is lost.
+        uint256 quotedNumerator = probeOut * reserveIn * 1e18;
+        // forge-lint: disable-next-line(divide-before-multiply)
+        uint256 quotedDenominator = probeIn * (reserveOut - probeOut);
+
+        // One part in a thousand of tolerance covers the pair's own floor division, which biases the
+        // recovered ratio by roughly 1/output.
+        uint256 configuredScaled = configuredFee * quotedDenominator;
+        uint256 quotedScaled = quotedNumerator;
+        uint256 difference =
+            configuredScaled > quotedScaled ? configuredScaled - quotedScaled : quotedScaled - configuredScaled;
+
+        require(
+            difference * 1000 <= quotedScaled,
+            string.concat(
+                "Configured swap fee does not match the DEX: configured=",
+                vm.toString(configuredFee),
+                " quoted=",
+                vm.toString((quotedNumerator * 1e18) / quotedDenominator)
+            )
+        );
+    }
+
+    function _reservesOf(address pairAddress, address tokenAddress)
+        internal
+        view
+        returns (uint256 reserveIn, uint256 reserveOut)
+    {
+        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
+        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
+        return tokenAddress == pair.token0()
+            ? (uint256(reserve0), uint256(reserve1))
+            : (uint256(reserve1), uint256(reserve0));
+    }
+
     function _validateDeployment(HubConfig memory config, LOVE20Hub hub) internal view {
         require(address(hub).code.length != 0, "Hub deployment failed");
         require(hub.STAKE_ADDRESS() == config.stake, "Stake mismatch");
@@ -100,6 +205,8 @@ contract DeployHub is Script {
         require(hub.LAUNCH_ADDRESS() == config.expectedLaunch, "Launch mismatch");
         require(hub.MEMBER_NFT_ADDRESS() == config.expectedMemberNFT, "Member NFT mismatch");
         require(hub.WRAPPED_NATIVE_ADDRESS() == config.expectedWrappedNative, "Wrapped native mismatch");
+        require(hub.SWAP_FEE_FOR_LP_RATIO() == config.swapFeeForLpRatio, "LP fee ratio mismatch");
+        require(hub.SWAP_FEE_FOR_PROTOCOL_RATIO() == config.swapFeeForProtocolRatio, "Protocol fee ratio mismatch");
     }
 
     function _logDeploymentSummary(address hubAddress) internal pure {

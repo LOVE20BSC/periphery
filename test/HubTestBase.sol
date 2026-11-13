@@ -14,9 +14,35 @@ import {
 } from "./mocks/HubMocks.sol";
 import {MockStake} from "./mocks/MockStake.sol";
 
+/// @dev The three real DEX profiles, as `(swap fee for LP, swap fee for protocol)` in 1e18 units. The pair
+///      and the router are configured from the same numbers, so the Hub's configured fee and the pool's
+///      actual behaviour can never drift apart by accident — only deliberately, in the tests that check
+///      what happens when a deployment is configured wrong.
+library DexProfile {
+    /// @dev The local `dex` repository: 0.30% swap fee, protocol fee permanently off.
+    function localDex() internal pure returns (uint256 lp, uint256 protocol) {
+        return (3_000_000_000_000_000, 0);
+    }
+
+    /// @dev Uniswap V2: 0.30% swap fee, 1/6 of sqrt(k) growth to the protocol (0.05% of 0.30%).
+    function uniswapV2() internal pure returns (uint256 lp, uint256 protocol) {
+        return (2_500_000_000_000_000, 500_000_000_000_000);
+    }
+
+    /// @dev PancakeSwap V2 mainnet: 0.25% total, 0.17% to LPs and 0.08% to the protocol.
+    function pancakeMainnet() internal pure returns (uint256 lp, uint256 protocol) {
+        return (1_700_000_000_000_000, 800_000_000_000_000);
+    }
+
+    /// @dev PancakeSwap V2 testnet: 0.20% total, 0.15% to LPs and 0.05% to the protocol.
+    function pancakeTestnet() internal pure returns (uint256 lp, uint256 protocol) {
+        return (1_500_000_000_000_000, 500_000_000_000_000);
+    }
+}
+
 /// @dev Shared fixture. The factory / pair / router triad uses the real constant-product math so the
 ///      Hub's swap, conversion and refund paths are exercised against the same arithmetic a deployed
-///      Uniswap V2 compatible DEX applies.
+///      Uniswap V2 compatible DEX applies. `setDexProfile` reconfigures all three at once.
 abstract contract HubTestBase is Test {
     uint256 internal constant MEMBER_ID = 1;
     uint256 internal constant OTHER_MEMBER_ID = 2;
@@ -56,7 +82,8 @@ abstract contract HubTestBase is Test {
             PHASES_MAX
         );
 
-        hub = new LOVE20Hub(address(stake));
+        (uint256 lpRatio, uint256 protocolRatio) = DexProfile.localDex();
+        hub = new LOVE20Hub(address(stake), lpRatio, protocolRatio);
 
         memberNFT.mint(MEMBER_ID, alice);
         memberNFT.mint(OTHER_MEMBER_ID, bob);
@@ -75,6 +102,32 @@ abstract contract HubTestBase is Test {
         _seed(1_000_000e18, 1_000_000e18);
     }
 
+    /// @dev Points the Hub, the router and the pair at one DEX profile. The Hub's ratios are `immutable`,
+    ///      so this redeploys the Hub: a fixture that kept the old instance would be testing a deployment
+    ///      whose configuration disagrees with the pool it trades against.
+    function _setDexProfile(uint256 lpRatio, uint256 protocolRatio) internal {
+        (uint256 feeNumerator, uint256 feeDenominator) = _reduced(1e18 - lpRatio - protocolRatio, 1e18);
+        (uint256 protocolNumerator, uint256 protocolDenominator) = protocolRatio == 0
+            ? (uint256(0), uint256(1))
+            : _reduced(protocolRatio, lpRatio);
+
+        router.setFee(feeNumerator, feeDenominator);
+        factory.setProtocolFee(protocolNumerator, protocolDenominator);
+        factory.setFeeTo(protocolRatio == 0 ? address(0) : address(0xFEE));
+        factory.configurePair(address(pair));
+
+        hub = new LOVE20Hub(address(stake), lpRatio, protocolRatio);
+    }
+
+    function _reduced(uint256 numerator, uint256 denominator) internal pure returns (uint256, uint256) {
+        uint256 a = numerator;
+        uint256 b = denominator;
+        while (b != 0) {
+            (a, b) = (b, a % b);
+        }
+        return (numerator / a, denominator / a);
+    }
+
     /// @dev Adds liquidity to the community pair. Called more than once by the tests that need a skewed
     ///      pool, so the approvals are unlimited rather than sized to the first seed.
     function _seed(uint256 tokenSeed, uint256 parentSeed) internal {
@@ -82,7 +135,13 @@ abstract contract HubTestBase is Test {
         wbnb.mint(address(this), parentSeed);
         token.approve(address(pair), type(uint256).max);
         wbnb.approve(address(pair), type(uint256).max);
-        pair.addLiquidity(tokenSeed, parentSeed, false);
+
+        (address token0,) = (pair.token0(), pair.token1());
+        if (address(token) == token0) {
+            pair.addLiquidity(tokenSeed, parentSeed);
+        } else {
+            pair.addLiquidity(parentSeed, tokenSeed);
+        }
     }
 
     function _fundAlice(uint256 tokenAmount, uint256 parentAmount) internal {
@@ -100,5 +159,13 @@ abstract contract HubTestBase is Test {
 
     function _parentOf(address) internal view returns (address) {
         return address(wbnb);
+    }
+
+    /// @dev The pair's reserves ordered as `(community token, parent)`, which is how the Hub reads them.
+    function _reserves() internal view returns (uint256 reserveToken, uint256 reserveParent) {
+        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
+        return address(token) == pair.token0()
+            ? (uint256(reserve0), uint256(reserve1))
+            : (uint256(reserve1), uint256(reserve0));
     }
 }

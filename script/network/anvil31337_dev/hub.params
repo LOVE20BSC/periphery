@@ -1,3 +1,27 @@
-# The Hub has no construction parameters beyond STAKE_ADDRESS, which lives in addresses.core.params: every
-# other dependency is derived from it. This file therefore carries only the module's own switches; it
-# exists so the module has a parameter file of its own, as the per-module layout requires.
+# Parameters for the LOVE20Hub module.
+#
+# The Hub takes one injected dependency (STAKE_ADDRESS, which lives in addresses.core.params) and derives
+# Router / Factory / Launch / MemberNFT / WrappedNative from it. What is left here is the DEX fee profile,
+# which cannot be derived from anything on chain and therefore has to be a deployment input.
+#
+# Two 1e18 ratios describe the swap fee by where it goes:
+#   SWAP_FEE_FOR_LP_RATIO        the part the pair keeps for liquidity providers
+#   SWAP_FEE_FOR_PROTOCOL_RATIO  the part the DEX protocol takes out of it (0 = protocol fee disabled)
+# The swap fee actually charged is their sum, and it is what the constant-product swap maths uses.
+#
+# This profile is the local `dex` repository: 0.30% swap fee, protocol fee permanently off (its Factory is
+# deployed with `feeToSetter = address(0)`, so `feeTo` can never be set).
+SWAP_FEE_FOR_LP_RATIO=3000000000000000
+SWAP_FEE_FOR_PROTOCOL_RATIO=0
+
+# Optional cross-check: a token that forms a funded pair with the wrapped native token. The deploy script
+# inverts one real `getAmountsOut` quote against this pair and aborts when the recovered swap fee disagrees
+# with the two ratios above. Left empty on the local chain because the Hub may be deployed before any pool
+# has liquidity; 21_check_hub.sh re-runs the same check when a pair is available.
+SWAP_FEE_PROBE_TOKEN=
+
+# Reference profiles for other deployments (not used by this network):
+#
+#   Uniswap V2          2500000000000000 / 500000000000000   (0.30% total, 1/6 of sqrt(k) growth)
+#   PancakeSwap mainnet 1700000000000000 / 800000000000000   (0.25% total: 0.17% LP + 0.08% protocol)
+#   PancakeSwap testnet 1500000000000000 / 500000000000000   (0.20% total: 0.15% LP + 0.05% protocol)

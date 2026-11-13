@@ -32,11 +32,49 @@ contract ConstructionTest is HubTestBase {
         assertFalse(hasInit, "no init");
         assertFalse(hasInitialized, "no initialized flag");
     }
+
+    /// @dev The fee ratios are deployment inputs, so they have to be readable back and must reject values
+    ///      that would make the swap maths overflow or the fee non-positive.
+    function testExposesTheConfiguredFeeRatios() public view {
+        assertEq(hub.SWAP_FEE_FOR_LP_RATIO(), 3_000_000_000_000_000, "local dex keeps 0.30%");
+        assertEq(hub.SWAP_FEE_FOR_PROTOCOL_RATIO(), 0, "local dex takes no protocol fee");
+    }
+
+    function testRejectsAZeroLpFeeRatio() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(ILOVE20HubErrors.InvalidFeeRatios.selector, uint256(0), uint256(0))
+        );
+        new LOVE20Hub(address(stake), 0, 0);
+    }
+
+    function testRejectsFeeRatiosThatConsumeTheWholeAmount() public {
+        vm.expectRevert();
+        new LOVE20Hub(address(stake), 5e17, 5e17);
+    }
+
+    function testRejectsFeeRatiosWhoseSumBreaksTheSwapMaths() public {
+        // A 0.01% fee reduces to F/D = 9999/10000, so F+D = 19999 which is still fine; a fee ratio that
+        // reduces to a sum above 65536 would overflow the closed form at uint112 reserves. 1 wei out of
+        // 1e18 reduces to F/D = 999999999999999999/1e18, sum 1999999999999999999 — far past the bound.
+        vm.expectRevert();
+        new LOVE20Hub(address(stake), 1, 0);
+    }
+
+    /// @dev The real profiles all construct successfully, which is the property that matters.
+    function testAcceptsEveryRealDexProfile() public {
+        (uint256 lp, uint256 protocol) = (2_500_000_000_000_000, 500_000_000_000_000);
+        new LOVE20Hub(address(stake), lp, protocol);
+        (lp, protocol) = (1_700_000_000_000_000, 800_000_000_000_000);
+        new LOVE20Hub(address(stake), lp, protocol);
+        (lp, protocol) = (1_500_000_000_000_000, 500_000_000_000_000);
+        new LOVE20Hub(address(stake), lp, protocol);
+    }
 }
 
-/// @dev Event contract. `periphery.hub` carries only the orchestration facts of this layer; the amounts
-///      that entered the position or the pool are recoverable as `prepared − remaining`, and both shapes
-///      ("exactly enough, no remainder" and "ratio off, refund issued") need a fixture.
+/// @dev Event contract. Two families: `periphery.hub` carries the staking facts rooted at the community
+///      token, `periphery.pair` carries the LP facts rooted at the pair. Both carry only the orchestration
+///      facts of this layer; the amounts that entered are recoverable as `prepared − remaining`, and both
+///      shapes ("exactly enough, no remainder" and "ratio off, refund issued") need a fixture.
 contract HubEventTest is HubTestBase {
     bytes32 internal constant STAKED_WITH_TOKEN_TOPIC =
         keccak256("HubLiquidityStakedWithToken(address,uint256,address,uint256,uint256,uint256,uint256)");
@@ -55,8 +93,8 @@ contract HubEventTest is HubTestBase {
         hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 10_000e18,
+                tokenAmountDesired: 10_000e18,
+                parentTokenAmountDesired: 0,
                 tokenAmountMin: 0,
                 parentTokenAmountMin: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
@@ -96,8 +134,8 @@ contract HubEventTest is HubTestBase {
         hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 10_000e18,
+                tokenAmountDesired: 10_000e18,
+                parentTokenAmountDesired: 0,
                 tokenAmountMin: 0,
                 parentTokenAmountMin: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
@@ -126,8 +164,8 @@ contract HubEventTest is HubTestBase {
         hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 10_000e18,
+                tokenAmountDesired: 10_000e18,
+                parentTokenAmountDesired: 0,
                 tokenAmountMin: 0,
                 parentTokenAmountMin: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
@@ -143,18 +181,20 @@ contract HubEventTest is HubTestBase {
         assertEq(token.balanceOf(address(hub)), 0, "the remainder was refunded, not kept");
     }
 
-    function testAddLiquidityEventsUseTheRecipientAsTheObjectKey() public {
+    /// @dev The LP events live in `periphery.pair`, so their root key is the pair, not the community token.
+    function testAddLiquidityEventsUseThePairAsTheRootKey() public {
         _fundAlice(10_000e18, 0);
 
         vm.recordLogs();
         vm.prank(alice);
         hub.addLiquidityWithToken(
             AddLiquidityWithTokenParams({
-                tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 10_000e18,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                tokenA: address(token),
+                tokenB: address(wbnb),
+                amountADesired: 10_000e18,
+                amountBDesired: 0,
+                amountAMin: 0,
+                amountBMin: 0,
                 to: bob,
                 deadline: block.timestamp
             })
@@ -165,7 +205,7 @@ contract HubEventTest is HubTestBase {
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].emitter != address(hub) || logs[i].topics[0] != ADDED_WITH_TOKEN_TOPIC) continue;
             found = true;
-            assertEq(address(uint160(uint256(logs[i].topics[1]))), address(token), "slot 1 is the root key");
+            assertEq(address(uint160(uint256(logs[i].topics[1]))), address(pair), "slot 1 is the pair root key");
             assertEq(address(uint160(uint256(logs[i].topics[2]))), bob, "slot 2 is the recipient, not a member id");
             assertEq(address(uint160(uint256(logs[i].topics[3]))), alice, "slot 3 is the caller");
         }
@@ -180,8 +220,9 @@ contract HubEventTest is HubTestBase {
         hub.addLiquidityWithNative{value: 10_000e18}(
             AddLiquidityWithNativeParams({
                 tokenAddress: address(token),
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                amountTokenDesired: 0,
+                amountTokenMin: 0,
+                amountNativeMin: 0,
                 to: bob,
                 deadline: block.timestamp
             })
@@ -193,14 +234,22 @@ contract HubEventTest is HubTestBase {
             if (logs[i].emitter != address(hub) || logs[i].topics[0] != ADDED_WITH_NATIVE_TOPIC) continue;
             found = true;
             assertEq(logs[i].topics.length, 4, "three indexed keys");
-            (uint256 preparedToken, uint256 preparedParent, uint256 remainingToken, uint256 remainingParent,) =
+            assertEq(address(uint160(uint256(logs[i].topics[1]))), address(pair), "slot 1 is the pair root key");
+            (uint256 preparedA, uint256 preparedB, uint256 remainingA, uint256 remainingB,) =
                 abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
-            assertGt(preparedToken, 0, "prepared token");
-            assertGt(preparedParent, 0, "prepared parent");
-            assertLe(remainingToken, preparedToken, "remainder bounded");
-            assertLe(remainingParent, preparedParent, "remainder bounded");
+            assertGt(preparedA, 0, "prepared A");
+            assertGt(preparedB, 0, "prepared B");
+            assertLe(remainingA, preparedA, "remainder bounded");
+            assertLe(remainingB, preparedB, "remainder bounded");
         }
         assertTrue(found, "event emitted");
+    }
+
+    /// @dev Both families are emitted by the same contract; the topic0s must stay distinct so an indexer
+    ///      can tell the two facts apart even before decoding the payload.
+    function testTheTwoFamiliesHaveDistinctTopics() public pure {
+        assertTrue(STAKED_WITH_TOKEN_TOPIC != ADDED_WITH_TOKEN_TOPIC, "stake and LP facts differ");
+        assertTrue(ADDED_WITH_TOKEN_TOPIC != ADDED_WITH_NATIVE_TOPIC, "funding shape differs");
     }
 
     function _stakeAmounts(Vm.Log[] memory logs)

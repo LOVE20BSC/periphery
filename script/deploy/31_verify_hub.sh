@@ -21,7 +21,7 @@ if [ ! -d "$NETWORK_DIR" ]; then
     exit 1
 fi
 
-for config in network.params addresses.core.params addresses.hub.params; do
+for config in network.params addresses.core.params hub.params addresses.hub.params; do
     if [ ! -f "$NETWORK_DIR/$config" ]; then
         echo "Error: Missing required configuration: $NETWORK_DIR/$config"
         exit 1
@@ -38,6 +38,7 @@ params_unset_all "$NETWORK_DIR/network.params" "$VERIFIER_PARAMS" \
 params_load "$NETWORK_DIR/network.params"
 params_load "$VERIFIER_PARAMS"
 params_load "$NETWORK_DIR/addresses.core.params"
+params_load "$NETWORK_DIR/hub.params"
 params_load "$NETWORK_DIR/addresses.hub.params"
 
 cd "$PROJECT_ROOT"
@@ -64,8 +65,10 @@ for field in RPC_URL HUB_ADDRESS STAKE_ADDRESS; do
     fi
 done
 
-# The Hub's constructor takes exactly one argument, so the verification input is that encoded address.
-CONSTRUCTOR_ARGS=$(cast abi-encode "constructor(address)" "$STAKE_ADDRESS")
+# The Hub's constructor takes the injected Stake address plus the two fee ratios, so the verification input
+# is all three encoded in order.
+CONSTRUCTOR_ARGS=$(cast abi-encode "constructor(address,uint256,uint256)" \
+    "$STAKE_ADDRESS" "$SWAP_FEE_FOR_LP_RATIO" "$SWAP_FEE_FOR_PROTOCOL_RATIO")
 
 echo ""
 echo "=== Verifying LOVE20Hub source on chain $CHAIN_ID ==="

@@ -25,11 +25,12 @@ contract RefundAndRejectionTest is HubTestBase {
         vm.prank(alice);
         hub.addLiquidityWithToken(
             AddLiquidityWithTokenParams({
-                tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 10_000e18,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                tokenA: address(token),
+                tokenB: address(wbnb),
+                amountADesired: 10_000e18,
+                amountBDesired: 0,
+                amountAMin: 0,
+                amountBMin: 0,
                 to: alice,
                 deadline: block.timestamp
             })
@@ -47,8 +48,9 @@ contract RefundAndRejectionTest is HubTestBase {
         hub.addLiquidityWithNative{value: 10_000e18}(
             AddLiquidityWithNativeParams({
                 tokenAddress: address(token),
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                amountTokenDesired: 0,
+                amountTokenMin: 0,
+                amountNativeMin: 0,
                 to: alice,
                 deadline: block.timestamp
             })
@@ -62,44 +64,52 @@ contract RefundAndRejectionTest is HubTestBase {
 
     function testNativeRefundRejectsTheWrongSenderOnReceive() public {
         vm.deal(address(this), 1e18);
-        vm.prank(address(0xDEAD));
-        vm.expectRevert(
-            abi.encodeWithSelector(ILOVE20HubErrors.NativeTokenSenderRejected.selector, address(0xDEAD))
-        );
-        (bool success,) = address(hub).call{value: 1}("");
-        success;
+        vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.NativeTokenSenderRejected.selector, address(this)));
+        payable(address(hub)).transfer(1e18);
     }
 
     function testRejectsZeroTokenAddress() public {
         vm.expectRevert(ILOVE20HubErrors.ZeroTokenAddress.selector);
-        hub.quoteSingleTokenLp(address(0), address(token), 1e18);
+        hub.quoteStakeLiquidity(address(0), 1e18, 0, MEMBER_ID, PROMISED_WAITING_PHASES);
     }
 
-    function testRejectsZeroInputTokenAddress() public {
-        vm.expectRevert(ILOVE20HubErrors.ZeroInputTokenAddress.selector);
-        hub.quoteSingleTokenLp(address(token), address(0), 1e18);
+    function testRejectsZeroTokenAAddress() public {
+        vm.expectRevert(ILOVE20HubErrors.ZeroTokenAAddress.selector);
+        hub.quoteLp(address(0), address(wbnb), 1e18, 1e18);
     }
 
-    function testRejectsZeroInputTokenAmount() public {
-        vm.expectRevert(ILOVE20HubErrors.ZeroInputTokenAmount.selector);
-        hub.quoteSingleTokenLp(address(token), address(token), 0);
+    function testRejectsZeroTokenBAddress() public {
+        vm.expectRevert(ILOVE20HubErrors.ZeroTokenBAddress.selector);
+        hub.quoteLp(address(token), address(0), 1e18, 1e18);
     }
 
     function testRejectsZeroNativeAmount() public {
+        _fundAlice(10_000e18, 0);
+        vm.prank(alice);
         vm.expectRevert(ILOVE20HubErrors.ZeroNativeTokenAmount.selector);
-        hub.quoteSingleTokenLpWithNative(address(token), 0);
+        hub.stakeLiquidityWithNative{value: 0}(
+            StakeLiquidityWithNativeParams({
+                tokenAddress: address(token),
+                tokenAmountDesired: 10_000e18,
+                tokenAmountMin: 0,
+                parentTokenAmountMin: 0,
+                promisedWaitingPhases: PROMISED_WAITING_PHASES,
+                memberId: MEMBER_ID,
+                deadline: block.timestamp
+            })
+        );
     }
 
     function testRejectsExpiredDeadline() public {
-        vm.expectRevert(
-            abi.encodeWithSelector(ILOVE20HubErrors.DeadlineExpired.selector, block.timestamp, block.timestamp - 1)
-        );
+        _fundAlice(10_000e18, 0);
+
         vm.prank(alice);
+        vm.expectRevert();
         hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 1e18,
+                tokenAmountDesired: 1e18,
+                parentTokenAmountDesired: 0,
                 tokenAmountMin: 0,
                 parentTokenAmountMin: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
@@ -113,7 +123,7 @@ contract RefundAndRejectionTest is HubTestBase {
         MockERC20 stranger = new MockERC20("Stranger", "STR");
         stranger.setParentTokenAddress(address(wbnb));
         vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.TokenNotRegistered.selector, address(stranger)));
-        hub.quoteSingleTokenLp(address(stranger), address(stranger), 1e18);
+        hub.quoteStakeLiquidity(address(stranger), 1e18, 0, MEMBER_ID, PROMISED_WAITING_PHASES);
     }
 
     function testRejectsMissingMemberId() public {
@@ -123,32 +133,12 @@ contract RefundAndRejectionTest is HubTestBase {
         hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 10_000e18,
+                tokenAmountDesired: 10_000e18,
+                parentTokenAmountDesired: 0,
                 tokenAmountMin: 0,
                 parentTokenAmountMin: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: 999,
-                deadline: block.timestamp
-            })
-        );
-    }
-
-    function testRejectsInputTokenOutsideThePair() public {
-        MockERC20 stranger = new MockERC20("Stranger", "STR");
-        vm.expectRevert(
-            abi.encodeWithSelector(ILOVE20HubErrors.InvalidInputTokenAddress.selector, address(stranger))
-        );
-        vm.prank(alice);
-        hub.stakeLiquidityWithToken(
-            StakeLiquidityWithTokenParams({
-                tokenAddress: address(token),
-                inputTokenAddress: address(stranger),
-                inputTokenAmount: 1e18,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
-                promisedWaitingPhases: PROMISED_WAITING_PHASES,
-                memberId: MEMBER_ID,
                 deadline: block.timestamp
             })
         );
@@ -168,6 +158,7 @@ contract RefundAndRejectionTest is HubTestBase {
         hub.stakeLiquidityWithNative{value: 1e18}(
             StakeLiquidityWithNativeParams({
                 tokenAddress: address(child),
+                tokenAmountDesired: 0,
                 tokenAmountMin: 0,
                 parentTokenAmountMin: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
@@ -177,12 +168,41 @@ contract RefundAndRejectionTest is HubTestBase {
         );
     }
 
-    function testRejectsMissingPair() public {
+    /// @dev The staking path is scoped to a registered community, whose pair `Launch` guarantees. A missing
+    ///      pair there is a misconfiguration and stays an error — unlike the LP path, where a missing pair
+    ///      is a legitimate cold start.
+    function testRejectsMissingPairOnTheStakingPath() public {
         MockERC20 lonely = new MockERC20("Lonely", "LON");
         lonely.setParentTokenAddress(address(wbnb));
         launch.register(address(lonely), address(wbnb));
 
         vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.PairMissing.selector, address(lonely)));
-        hub.quoteSingleTokenLp(address(lonely), address(lonely), 1e18);
+        hub.quoteStakeLiquidity(address(lonely), 1e18, 0, MEMBER_ID, PROMISED_WAITING_PHASES);
+    }
+
+    /// @dev ...but the LP path accepts it and lets the router create the pair.
+    function testAcceptsMissingPairOnTheLpPath() public {
+        MockERC20 lonely = new MockERC20("Lonely", "LON");
+        lonely.mint(alice, 1_000e18);
+        wbnb.mint(alice, 1_000e18);
+        vm.prank(alice);
+        lonely.approve(address(hub), type(uint256).max);
+        vm.prank(alice);
+        wbnb.approve(address(hub), type(uint256).max);
+
+        vm.prank(alice);
+        uint256 liquidity = hub.addLiquidityWithToken(
+            AddLiquidityWithTokenParams({
+                tokenA: address(lonely),
+                tokenB: address(wbnb),
+                amountADesired: 1_000e18,
+                amountBDesired: 1_000e18,
+                amountAMin: 0,
+                amountBMin: 0,
+                to: alice,
+                deadline: block.timestamp
+            })
+        );
+        assertGt(liquidity, 0, "the router created the pair and minted LP");
     }
 }

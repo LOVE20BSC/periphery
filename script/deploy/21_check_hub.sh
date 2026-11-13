@@ -4,7 +4,8 @@ set -euo pipefail
 # Deployment check: read-only over config and chain state (never writes an address file). Loads its own
 # check inputs instead of relying on a preloaded environment: network.params provides RPC and chain ID,
 # addresses.core.params the expected dependency bindings, addresses.uniswapv2.params the expected router
-# and wrapped native token, and addresses.hub.params the deployed address to verify.
+# and wrapped native token, hub.params the expected fee profile, and addresses.hub.params the deployed
+# address to verify.
 # Usage: script/deploy/21_check_hub.sh <network>
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -25,7 +26,7 @@ if [ ! -d "$NETWORK_DIR" ]; then
     exit 1
 fi
 
-for config in network.params addresses.core.params addresses.uniswapv2.params addresses.hub.params; do
+for config in network.params addresses.core.params addresses.uniswapv2.params hub.params addresses.hub.params; do
     if [ ! -f "$NETWORK_DIR/$config" ]; then
         echo "Error: Missing required configuration: $NETWORK_DIR/$config"
         exit 1
@@ -38,11 +39,13 @@ params_unset_all \
     "$NETWORK_DIR/network.params" \
     "$NETWORK_DIR/addresses.core.params" \
     "$NETWORK_DIR/addresses.uniswapv2.params" \
+    "$NETWORK_DIR/hub.params" \
     "$NETWORK_DIR/addresses.hub.params"
 
 params_load "$NETWORK_DIR/network.params"
 params_load "$NETWORK_DIR/addresses.core.params"
 params_load "$NETWORK_DIR/addresses.uniswapv2.params"
+params_load "$NETWORK_DIR/hub.params"
 params_load "$NETWORK_DIR/addresses.hub.params"
 
 # The address file's key set must equal the expected contract set: a renamed key would leave later
@@ -153,6 +156,11 @@ verify_binding "PAIR_FACTORY_ADDRESS()(address)" "$PAIR_FACTORY_ADDRESS"
 verify_binding "LAUNCH_ADDRESS()(address)" "$LAUNCH_ADDRESS"
 verify_binding "MEMBER_NFT_ADDRESS()(address)" "$MEMBER_NFT_ADDRESS"
 verify_binding "WRAPPED_NATIVE_ADDRESS()(address)" "$WRAPPED_NATIVE_ADDRESS"
+
+# The fee profile is a deployment input, so the deployed values are checked against hub.params rather than
+# against anything derivable on chain.
+verify_binding "SWAP_FEE_FOR_LP_RATIO()(uint256)" "$SWAP_FEE_FOR_LP_RATIO"
+verify_binding "SWAP_FEE_FOR_PROTOCOL_RATIO()(uint256)" "$SWAP_FEE_FOR_PROTOCOL_RATIO"
 
 # The stored dependency graph must itself be self-consistent: Stake is the only injected value, so every
 # derived address has to agree with what Stake reports, and the router must still answer with the same

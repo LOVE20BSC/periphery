@@ -1,8 +1,11 @@
 # Event -> family map, enforced by script/events/check-events.py.
 # Families and slot rules: matt-gov/docs/event-standards.md §6.1.
-# This repository emits exactly one family, `periphery.hub`. The second indexed slot is `memberId` on
-# the stake facts and the recipient `to` on the LP facts; the third is always `caller`.
+# This repository emits two families, split by the root key of the fact they record:
+#   periphery.hub  - staking facts, rooted at the community `tokenAddress`; second indexed slot is `memberId`
+#   periphery.pair - LP facts, rooted at the `pairAddress`; second indexed slot is the recipient `to`
+# Both carry `caller` in the third indexed slot. The split is what lets the checker enforce each root key
+# instead of accepting "either of the two".
 HubLiquidityStakedWithToken periphery.hub
 HubLiquidityStakedWithNative periphery.hub
-HubLiquidityAddedWithToken periphery.hub
-HubLiquidityAddedWithNative periphery.hub
+HubLiquidityAddedWithToken periphery.pair
+HubLiquidityAddedWithNative periphery.pair

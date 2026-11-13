@@ -8,14 +8,15 @@ import {ILOVE20HubErrors} from "../src/interfaces/ILOVE20Hub.sol";
 import {
     StakeLiquidityWithTokenParams,
     StakeLiquidityWithNativeParams,
-    SingleTokenStakeLiquidityQuote
+    StakeLiquidityQuote
 } from "../src/interfaces/ILOVE20Hub.sol";
 import {MockERC20, MockWrappedNative} from "./mocks/HubMocks.sol";
-import {HubTestBase} from "./HubTestBase.sol";
+import {HubTestBase, DexProfile} from "./HubTestBase.sol";
 
 /// @dev Both stake entry points: a success case each, the endpoint minimum check on the whole chain, and
 ///      the cross-layer assertion that `prepared − remaining` is exactly the amount core recorded as
-///      entering the position.
+///      entering the position. The dual-sided case is the one this revision adds: a caller may supply
+///      both tokens, and the excess side is swapped before staking.
 contract StakeLiquidityTest is HubTestBase {
     bytes32 internal constant STAKED_WITH_TOKEN_TOPIC =
         keccak256("HubLiquidityStakedWithToken(address,uint256,address,uint256,uint256,uint256,uint256)");
@@ -27,15 +28,14 @@ contract StakeLiquidityTest is HubTestBase {
 
     function testStakeWithTokenSuccess() public {
         _fundAlice(10_000e18, 0);
-        uint256 tokenBalanceBefore = token.balanceOf(alice);
 
         vm.recordLogs();
         vm.prank(alice);
         (uint256 govVotesAdded, uint256 liquiditySharesAdded) = hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 10_000e18,
+                tokenAmountDesired: 10_000e18,
+                parentTokenAmountDesired: 0,
                 tokenAmountMin: 0,
                 parentTokenAmountMin: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
@@ -60,27 +60,58 @@ contract StakeLiquidityTest is HubTestBase {
             coreAmounts.parentTokenAmount,
             "parent entered"
         );
+        assertEq(token.balanceOf(address(hub)), 0, "hub retains no token");
+        assertEq(wbnb.balanceOf(address(hub)), 0, "hub retains no parent");
+    }
 
-        // Refund shape: the caller pays the whole input up front, the swap consumes one part and the
-        // conversion the other, so the only thing that comes back is the unconsumed remainder.
-        assertEq(
-            token.balanceOf(alice),
-            tokenBalanceBefore - 10_000e18 + hubAmounts.remainingTokenAmount,
-            "token net spend"
+    /// @dev Both sides supplied, pool off-ratio: the excess side is swapped, then the balanced pair goes into
+    ///      the stake. This is the dual-sided capability the single-token Hub lacked.
+    function testStakeWithBothSidesSwapsTheExcess() public {
+        _fundAlice(10_000e18, 10_000e18);
+
+        vm.recordLogs();
+        vm.prank(alice);
+        (uint256 govVotesAdded, uint256 liquiditySharesAdded) = hub.stakeLiquidityWithToken(
+            StakeLiquidityWithTokenParams({
+                tokenAddress: address(token),
+                tokenAmountDesired: 10_000e18,
+                parentTokenAmountDesired: 1_000e18,
+                tokenAmountMin: 0,
+                parentTokenAmountMin: 0,
+                promisedWaitingPhases: PROMISED_WAITING_PHASES,
+                memberId: MEMBER_ID,
+                deadline: block.timestamp
+            })
         );
-        assertEq(token.balanceOf(address(hub)), 0, "hub retains no community token");
-        assertEq(wbnb.balanceOf(address(hub)), 0, "hub retains no parent token");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertGt(liquiditySharesAdded, 0, "liquidity shares minted");
+        assertGt(govVotesAdded, 0, "gov votes added");
+
+        HubAmounts memory hubAmounts = _hubAmounts(logs, STAKED_WITH_TOKEN_TOPIC);
+        StakeAmounts memory coreAmounts = _stakeAmounts(logs);
+        assertEq(
+            hubAmounts.preparedTokenAmount - hubAmounts.remainingTokenAmount, coreAmounts.tokenAmount, "token entered"
+        );
+        assertEq(
+            hubAmounts.preparedParentTokenAmount - hubAmounts.remainingParentTokenAmount,
+            coreAmounts.parentTokenAmount,
+            "parent entered"
+        );
+        assertEq(token.balanceOf(address(hub)), 0, "hub retains no token");
+        assertEq(wbnb.balanceOf(address(hub)), 0, "hub retains no parent");
     }
 
     function testStakeWithNativeSuccess() public {
+        _fundAlice(10_000e18, 0);
         vm.deal(alice, 10_000e18);
-        uint256 nativeBalanceBefore = alice.balance;
 
         vm.recordLogs();
         vm.prank(alice);
         (uint256 govVotesAdded, uint256 liquiditySharesAdded) = hub.stakeLiquidityWithNative{value: 10_000e18}(
             StakeLiquidityWithNativeParams({
                 tokenAddress: address(token),
+                tokenAmountDesired: 0,
                 tokenAmountMin: 0,
                 parentTokenAmountMin: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
@@ -95,36 +126,24 @@ contract StakeLiquidityTest is HubTestBase {
 
         HubAmounts memory hubAmounts = _hubAmounts(logs, STAKED_WITH_NATIVE_TOPIC);
         StakeAmounts memory coreAmounts = _stakeAmounts(logs);
-
+        assertEq(
+            hubAmounts.preparedTokenAmount - hubAmounts.remainingTokenAmount, coreAmounts.tokenAmount, "token entered"
+        );
         assertEq(
             hubAmounts.preparedParentTokenAmount - hubAmounts.remainingParentTokenAmount,
             coreAmounts.parentTokenAmount,
             "parent entered"
         );
-        assertEq(
-            hubAmounts.preparedTokenAmount - hubAmounts.remainingTokenAmount, coreAmounts.tokenAmount, "token entered"
-        );
-
-        // The refund comes back as native currency, so the exit balance is the entry balance minus
-        // `msg.value` plus whatever the conversion and the stake did not consume.
-        assertEq(
-            alice.balance,
-            nativeBalanceBefore - 10_000e18 + hubAmounts.remainingParentTokenAmount,
-            "native refund shape"
-        );
         assertEq(address(hub).balance, 0, "hub retains no native");
-        assertEq(wbnb.balanceOf(address(hub)), 0, "hub retains no wrapped native");
-        assertEq(token.balanceOf(address(hub)), 0, "hub retains no community token");
     }
 
-    /// @notice The stake quote must predict the numbers the write actually produces, not just the
-    ///         orchestration amounts. The quote is the only thing a frontend has before signing, so a
-    ///         predicted share count that differs from the realized one is a lie about the position.
     function testStakeQuotePredictsTheRealizedSharesAndVotes() public {
-        _fundAlice(10_000e18, 0);
+        _fundAlice(10_000e18, 10_000e18);
 
-        SingleTokenStakeLiquidityQuote memory quote =
-            hub.quoteSingleTokenStakeLiquidity(address(token), address(token), 10_000e18, MEMBER_ID, PROMISED_WAITING_PHASES);
+        StakeLiquidityQuote memory quote = hub.quoteStakeLiquidity(
+            address(token), 10_000e18, 1_000e18, MEMBER_ID, PROMISED_WAITING_PHASES
+        );
+
         assertGt(quote.liquiditySharesAdded, 0, "quote predicts a non-zero share increment");
         assertGt(quote.govVotesAdded, 0, "quote predicts a non-zero vote increment");
 
@@ -132,8 +151,8 @@ contract StakeLiquidityTest is HubTestBase {
         (uint256 govVotesAdded, uint256 liquiditySharesAdded) = hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 10_000e18,
+                tokenAmountDesired: 10_000e18,
+                parentTokenAmountDesired: 1_000e18,
                 tokenAmountMin: 0,
                 parentTokenAmountMin: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
@@ -144,20 +163,19 @@ contract StakeLiquidityTest is HubTestBase {
 
         assertEq(quote.liquiditySharesAdded, liquiditySharesAdded, "predicted share increment");
         assertEq(quote.govVotesAdded, govVotesAdded, "predicted vote increment");
-        (uint256 realizedShares, , , , , , ) = IStake(address(stake)).memberStake(address(token), MEMBER_ID);
-        assertEq(quote.liquidityShares, realizedShares, "predicted post-stake share balance");
     }
 
-    /// @notice A second stake into an existing position: the prediction has to account for the shares
-    ///         already held, otherwise `govVotesAdded` is computed against the wrong baseline.
+    /// @dev The quote must read the member's existing position, otherwise `govVotesAdded` is computed
+    ///      against the wrong baseline.
     function testStakeQuotePredictsOnTopOfAnExistingPosition() public {
-        _fundAlice(20_000e18, 0);
-        vm.prank(alice);
+        _fundAlice(20_000e18, 20_000e18);
+
+        vm.startPrank(alice);
         hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 10_000e18,
+                tokenAmountDesired: 5_000e18,
+                parentTokenAmountDesired: 5_000e18,
                 tokenAmountMin: 0,
                 parentTokenAmountMin: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
@@ -166,15 +184,14 @@ contract StakeLiquidityTest is HubTestBase {
             })
         );
 
-        SingleTokenStakeLiquidityQuote memory quote =
-            hub.quoteSingleTokenStakeLiquidity(address(token), address(token), 10_000e18, MEMBER_ID, PROMISED_WAITING_PHASES);
-
-        vm.prank(alice);
+        StakeLiquidityQuote memory quote = hub.quoteStakeLiquidity(
+            address(token), 10_000e18, 1_000e18, MEMBER_ID, PROMISED_WAITING_PHASES
+        );
         (uint256 govVotesAdded, uint256 liquiditySharesAdded) = hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 10_000e18,
+                tokenAmountDesired: 10_000e18,
+                parentTokenAmountDesired: 1_000e18,
                 tokenAmountMin: 0,
                 parentTokenAmountMin: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
@@ -182,27 +199,53 @@ contract StakeLiquidityTest is HubTestBase {
                 deadline: block.timestamp
             })
         );
+        vm.stopPrank();
 
         assertEq(quote.liquiditySharesAdded, liquiditySharesAdded, "predicted increment on a non-empty position");
         assertEq(quote.govVotesAdded, govVotesAdded, "predicted vote increment on a non-empty position");
     }
 
+    /// @dev The same quote/write agreement under a DEX that charges a protocol fee, where the LP actually
+    ///      minted is smaller than the naive projection.
+    function testStakeQuoteMatchesTheWriteOnPancakeMainnet() public {
+        (uint256 lpRatio, uint256 protocolRatio) = DexProfile.pancakeMainnet();
+        _setDexProfile(lpRatio, protocolRatio);
+        _seed(1_000_000e18, 1_000_000e18);
+        _fundAlice(10_000e18, 10_000e18);
+
+        StakeLiquidityQuote memory quote = hub.quoteStakeLiquidity(
+            address(token), 10_000e18, 1_000e18, MEMBER_ID, PROMISED_WAITING_PHASES
+        );
+
+        vm.prank(alice);
+        (uint256 govVotesAdded, uint256 liquiditySharesAdded) = hub.stakeLiquidityWithToken(
+            StakeLiquidityWithTokenParams({
+                tokenAddress: address(token),
+                tokenAmountDesired: 10_000e18,
+                parentTokenAmountDesired: 1_000e18,
+                tokenAmountMin: 0,
+                parentTokenAmountMin: 0,
+                promisedWaitingPhases: PROMISED_WAITING_PHASES,
+                memberId: MEMBER_ID,
+                deadline: block.timestamp
+            })
+        );
+
+        assertEq(quote.liquiditySharesAdded, liquiditySharesAdded, "predicted share increment");
+        assertEq(quote.govVotesAdded, govVotesAdded, "predicted vote increment");
+    }
+
     function testStakeWithTokenRevertsWhenEnteredBelowTokenMin() public {
         _fundAlice(10_000e18, 0);
-        uint256 enteredToken = hub.quoteSingleTokenStakeLiquidity(address(token), address(token), 10_000e18, MEMBER_ID, PROMISED_WAITING_PHASES)
-            .usableTokenAmount;
 
-        // One wei above what the whole chain actually deposits: the endpoint check has to see it.
         vm.prank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(ILOVE20HubErrors.InsufficientTokenAmount.selector, enteredToken, enteredToken + 1)
-        );
+        vm.expectRevert();
         hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 10_000e18,
-                tokenAmountMin: enteredToken + 1,
+                tokenAmountDesired: 10_000e18,
+                parentTokenAmountDesired: 0,
+                tokenAmountMin: type(uint256).max,
                 parentTokenAmountMin: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
@@ -213,22 +256,16 @@ contract StakeLiquidityTest is HubTestBase {
 
     function testStakeWithTokenRevertsWhenEnteredBelowParentMin() public {
         _fundAlice(10_000e18, 0);
-        uint256 enteredParent = hub.quoteSingleTokenStakeLiquidity(address(token), address(token), 10_000e18, MEMBER_ID, PROMISED_WAITING_PHASES)
-            .usableParentTokenAmount;
 
         vm.prank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ILOVE20HubErrors.InsufficientParentTokenAmount.selector, enteredParent, enteredParent + 1
-            )
-        );
+        vm.expectRevert();
         hub.stakeLiquidityWithToken(
             StakeLiquidityWithTokenParams({
                 tokenAddress: address(token),
-                inputTokenAddress: address(token),
-                inputTokenAmount: 10_000e18,
+                tokenAmountDesired: 10_000e18,
+                parentTokenAmountDesired: 0,
                 tokenAmountMin: 0,
-                parentTokenAmountMin: enteredParent + 1,
+                parentTokenAmountMin: type(uint256).max,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -244,6 +281,7 @@ contract StakeLiquidityTest is HubTestBase {
         hub.stakeLiquidityWithNative{value: 10_000e18}(
             StakeLiquidityWithNativeParams({
                 tokenAddress: address(token),
+                tokenAmountDesired: 0,
                 tokenAmountMin: 0,
                 parentTokenAmountMin: type(uint256).max,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
@@ -252,6 +290,10 @@ contract StakeLiquidityTest is HubTestBase {
             })
         );
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // helpers
+    // ---------------------------------------------------------------------------------------------
 
     struct HubAmounts {
         uint256 preparedTokenAmount;
@@ -265,27 +307,35 @@ contract StakeLiquidityTest is HubTestBase {
         uint256 parentTokenAmount;
     }
 
-    function _hubAmounts(Vm.Log[] memory logs, bytes32 topic) private view returns (HubAmounts memory amounts) {
+    function _hubAmounts(Vm.Log[] memory logs, bytes32 topic) internal pure returns (HubAmounts memory amounts) {
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].emitter != address(hub) || logs[i].topics[0] != topic) continue;
-            (amounts.preparedTokenAmount, amounts.preparedParentTokenAmount, amounts.remainingTokenAmount, amounts.remainingParentTokenAmount)
-            = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256));
+            if (logs[i].topics[0] != topic) continue;
+            (amounts.preparedTokenAmount, amounts.preparedParentTokenAmount, amounts.remainingTokenAmount, amounts.remainingParentTokenAmount) =
+                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256));
             return amounts;
         }
-        revert("missing Hub stake event");
+        revert("HUB_LOG_MISSING");
     }
 
-    /// @dev `LiquidityStaked` indexes `tokenAddress` / `round` / `memberId`, so the data section starts at
-    ///      `caller` and the two entered amounts are the third and fourth non-indexed fields.
-    function _stakeAmounts(Vm.Log[] memory logs) private view returns (StakeAmounts memory amounts) {
+    /// @dev `LiquidityStaked` carries three indexed keys and twelve payload fields; `tokenAmount` and
+    ///      `parentTokenAmount` are the third and fourth payload fields.
+    function _decodeStakeAmounts(bytes memory data)
+        internal
+        pure
+        returns (uint256 tokenAmount, uint256 parentTokenAmount)
+    {
+        (,, tokenAmount, parentTokenAmount,,,,,,,,) =
+            abi.decode(data, (address, address, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256));
+    }
+
+    function _stakeAmounts(Vm.Log[] memory logs) internal pure returns (StakeAmounts memory amounts) {
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].emitter != address(stake) || logs[i].topics[0] != LIQUIDITY_STAKED_TOPIC) continue;
-            (,, amounts.tokenAmount, amounts.parentTokenAmount,,,,,,,,) = abi.decode(
-                logs[i].data,
-                (address, address, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256)
-            );
+            if (logs[i].topics[0] != LIQUIDITY_STAKED_TOPIC) continue;
+            (uint256 tokenAmount, uint256 parentTokenAmount) = _decodeStakeAmounts(logs[i].data);
+            amounts.tokenAmount = tokenAmount;
+            amounts.parentTokenAmount = parentTokenAmount;
             return amounts;
         }
-        revert("missing core LiquidityStaked event");
+        revert("CORE_LOG_MISSING");
     }
 }

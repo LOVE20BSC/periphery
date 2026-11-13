@@ -114,6 +114,22 @@ def structural():
         check((net / required).is_file(), f"anvil31337_dev carries {required}")
     check((net / "addresses.hub.params").is_file(), "anvil31337_dev carries addresses.hub.params")
 
+    # The fee profile is a deployment input, so its keys must exist and be non-empty: an empty ratio would
+    # reach `vm.envUint` and fail after the run started instead of here.
+    hub_params = (net / "hub.params").read_text()
+    for key in ("SWAP_FEE_FOR_LP_RATIO", "SWAP_FEE_FOR_PROTOCOL_RATIO"):
+        match = re.search(rf"^{key}=(\S+)\s*$", hub_params, re.MULTILINE)
+        check(match is not None and match.group(1) != "", f"hub.params defines a non-empty {key}")
+    # The local dex profile: 0.30% kept by LPs and no protocol fee.
+    check(
+        re.search(r"^SWAP_FEE_FOR_LP_RATIO=3000000000000000\s*$", hub_params, re.MULTILINE) is not None,
+        "the local profile keeps 0.30% for LPs",
+    )
+    check(
+        re.search(r"^SWAP_FEE_FOR_PROTOCOL_RATIO=0\s*$", hub_params, re.MULTILINE) is not None,
+        "the local dex takes no protocol fee",
+    )
+
     check(
         (net / ".account.example").is_file(),
         ".account.example is committed so a fresh checkout knows the expected keys",
