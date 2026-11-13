@@ -65,10 +65,8 @@ for field in RPC_URL HUB_ADDRESS STAKE_ADDRESS; do
     fi
 done
 
-# The Hub's constructor takes the injected Stake address plus the two fee ratios, so the verification input
-# is all three encoded in order.
-CONSTRUCTOR_ARGS=$(cast abi-encode "constructor(address,uint256,uint256)" \
-    "$STAKE_ADDRESS" "$SWAP_FEE_FOR_LP_RATIO" "$SWAP_FEE_FOR_PROTOCOL_RATIO")
+# The Hub's constructor takes only the injected Stake address; the fee profile is read from Stake.
+CONSTRUCTOR_ARGS=$(cast abi-encode "constructor(address)" "$STAKE_ADDRESS")
 
 echo ""
 echo "=== Verifying LOVE20Hub source on chain $CHAIN_ID ==="

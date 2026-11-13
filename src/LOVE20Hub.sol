@@ -65,10 +65,10 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
     uint256 private constant UNISWAP_V2_MINIMUM_LIQUIDITY = 1000;
     uint256 private constant UNISWAP_V2_MAX_RESERVE = type(uint112).max;
 
-    /// @dev Both fee ratios are 1e18 fixed point fractions of the swap amount. They are deployment inputs
-    ///      rather than constants because the Hub may point at any Uniswap V2 compatible DEX, and the two
-    ///      values differ per deployment: the local `dex` charges 0.30% and takes no protocol fee, Pancake
-    ///      mainnet charges 0.25% of which 0.08% goes to the protocol, Pancake testnet 0.20%/0.05%.
+    /// @dev Both fee ratios are 1e18 fixed point fractions of the swap amount, copied from `Stake` at
+    ///      construction. They differ per deployment: the local `dex` charges 0.30% and takes no protocol
+    ///      fee, Pancake mainnet charges 0.25% of which 0.08% goes to the protocol, Pancake testnet
+    ///      0.20%/0.05%.
     ///
     ///      `SWAP_FEE_FOR_LP_RATIO` is the part the pair keeps; `SWAP_FEE_FOR_PROTOCOL_RATIO` is the part
     ///      the DEX takes out of it. The swap fee actually charged is their sum, and it is also exactly the
@@ -88,8 +88,14 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
 
     address public immutable WRAPPED_NATIVE_ADDRESS;
 
+    /// @dev The DEX profile is not a constructor input: `Stake` already stores it, because it needs the
+    ///      same two ratios to predict the pair's `_mintFee`. Reading them from there keeps one source of
+    ///      truth, so the Hub cannot be deployed against a fee profile that disagrees with the one the
+    ///      staking maths uses.
     // forge-lint: disable-next-item(missing-zero-check)
-    constructor(address stakeAddress, uint256 swapFeeForLpRatio, uint256 swapFeeForProtocolRatio) {
+    constructor(address stakeAddress) {
+        uint256 swapFeeForLpRatio = IStake(stakeAddress).SWAP_FEE_FOR_LP_RATIO();
+        uint256 swapFeeForProtocolRatio = IStake(stakeAddress).SWAP_FEE_FOR_PROTOCOL_RATIO();
         if (swapFeeForLpRatio == 0) revert InvalidFeeRatios(swapFeeForLpRatio, swapFeeForProtocolRatio);
         if (swapFeeForLpRatio + swapFeeForProtocolRatio >= PRECISION) {
             revert InvalidFeeRatios(swapFeeForLpRatio, swapFeeForProtocolRatio);

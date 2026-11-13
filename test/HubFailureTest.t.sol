@@ -146,15 +146,14 @@ contract SwapMathBoundTest is HubTestBase {
         // A 1 wei fee leaves F/D = 999999999999999999/1e18, which reduces no further: F+D is ~2e18, far
         // past the 65536 the closed form needs. The constructor rejects it instead of letting a future
         // swap overflow.
-        vm.expectRevert();
-        new LOVE20Hub(address(stake), 1, 0);
+        _expectHubRejectsProfile(1, 0);
 
         // Coarse ratios reduce to small integers, so a large nominal fee is still fine: 50% reduces to
         // 1/2 and constructs successfully.
-        new LOVE20Hub(address(stake), 5e17, 0);
+        _hubAgainstProfile(5e17, 0);
 
         // Every real profile is far inside the bound.
-        new LOVE20Hub(address(stake), 3_000_000_000_000_000, 0);
+        _hubAgainstProfile(3_000_000_000_000_000, 0);
     }
 
     /// @dev The quote must not revert for the largest input the guard allows, which is where the closed

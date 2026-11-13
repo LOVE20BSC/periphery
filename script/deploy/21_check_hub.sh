@@ -157,10 +157,16 @@ verify_binding "LAUNCH_ADDRESS()(address)" "$LAUNCH_ADDRESS"
 verify_binding "MEMBER_NFT_ADDRESS()(address)" "$MEMBER_NFT_ADDRESS"
 verify_binding "WRAPPED_NATIVE_ADDRESS()(address)" "$WRAPPED_NATIVE_ADDRESS"
 
-# The fee profile is a deployment input, so the deployed values are checked against hub.params rather than
-# against anything derivable on chain.
-verify_binding "SWAP_FEE_FOR_LP_RATIO()(uint256)" "$SWAP_FEE_FOR_LP_RATIO"
-verify_binding "SWAP_FEE_FOR_PROTOCOL_RATIO()(uint256)" "$SWAP_FEE_FOR_PROTOCOL_RATIO"
+# The fee profile is copied from Stake at construction, so the Hub must report exactly what Stake stores.
+# hub.params is only an expectation of what Stake should hold; the authoritative pair is Stake's.
+stake_lp_ratio=$(cast call "$STAKE_ADDRESS" "SWAP_FEE_FOR_LP_RATIO()(uint256)" --rpc-url "$RPC_URL" 2>/dev/null || true)
+stake_protocol_ratio=$(cast call "$STAKE_ADDRESS" "SWAP_FEE_FOR_PROTOCOL_RATIO()(uint256)" --rpc-url "$RPC_URL" 2>/dev/null || true)
+verify_value "Stake.SWAP_FEE_FOR_LP_RATIO" "$SWAP_FEE_FOR_LP_RATIO" "$stake_lp_ratio"
+verify_value "Stake.SWAP_FEE_FOR_PROTOCOL_RATIO" "$SWAP_FEE_FOR_PROTOCOL_RATIO" "$stake_protocol_ratio"
+hub_lp_ratio=$(cast call "$HUB_ADDRESS" "SWAP_FEE_FOR_LP_RATIO()(uint256)" --rpc-url "$RPC_URL" 2>/dev/null || true)
+hub_protocol_ratio=$(cast call "$HUB_ADDRESS" "SWAP_FEE_FOR_PROTOCOL_RATIO()(uint256)" --rpc-url "$RPC_URL" 2>/dev/null || true)
+verify_value "Hub.SWAP_FEE_FOR_LP_RATIO" "$stake_lp_ratio" "$hub_lp_ratio"
+verify_value "Hub.SWAP_FEE_FOR_PROTOCOL_RATIO" "$stake_protocol_ratio" "$hub_protocol_ratio"
 
 # The stored dependency graph must itself be self-consistent: Stake is the only injected value, so every
 # derived address has to agree with what Stake reports, and the router must still answer with the same

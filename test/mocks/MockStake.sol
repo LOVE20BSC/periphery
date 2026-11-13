@@ -50,6 +50,8 @@ contract MockStake is IStake {
     uint256 public immutable override FEE_SETTLEMENT_RATIO;
     uint256 public immutable override BOOST_STAKE_SUPPLY_FACTOR;
     uint256 public immutable override BOOST_STAKE_MULTIPLIER;
+    uint256 public immutable override SWAP_FEE_FOR_LP_RATIO;
+    uint256 public immutable override SWAP_FEE_FOR_PROTOCOL_RATIO;
     uint256 public constant override LIQUIDITY_TOKEN_EQUIVALENCE_FACTOR = 2;
 
     address public pairFactory;
@@ -66,7 +68,9 @@ contract MockStake is IStake {
         address routerAddress,
         address pairFactoryAddress,
         uint256 promisedWaitingPhasesMin,
-        uint256 promisedWaitingPhasesMax
+        uint256 promisedWaitingPhasesMax,
+        uint256 swapFeeForLpRatio,
+        uint256 swapFeeForProtocolRatio
     ) {
         MEMBER_NFT_ADDRESS = memberNFTAddress;
         LAUNCH_ADDRESS = launchAddress;
@@ -79,6 +83,8 @@ contract MockStake is IStake {
         FEE_SETTLEMENT_RATIO = 0;
         BOOST_STAKE_SUPPLY_FACTOR = 1;
         BOOST_STAKE_MULTIPLIER = 1;
+        SWAP_FEE_FOR_LP_RATIO = swapFeeForLpRatio;
+        SWAP_FEE_FOR_PROTOCOL_RATIO = swapFeeForProtocolRatio;
     }
 
     function stakeLiquidity(

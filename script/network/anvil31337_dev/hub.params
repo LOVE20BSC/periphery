@@ -1,8 +1,13 @@
 # Parameters for the LOVE20Hub module.
 #
 # The Hub takes one injected dependency (STAKE_ADDRESS, which lives in addresses.core.params) and derives
-# Router / Factory / Launch / MemberNFT / WrappedNative from it. What is left here is the DEX fee profile,
-# which cannot be derived from anything on chain and therefore has to be a deployment input.
+# Router / Factory / Launch / MemberNFT / WrappedNative from it. The DEX fee profile is no longer a Hub
+# input either: Stake stores it (it needs the same two ratios to predict the pair's `_mintFee`) and the
+# Hub copies it at construction, so there is one source of truth.
+#
+# The two values below are therefore an EXPECTATION, not a setting: the deploy script asserts that Stake
+# reports exactly these before broadcasting. They must stay in sync with core.params, which is where the
+# profile is actually configured.
 #
 # Two 1e18 ratios describe the swap fee by where it goes:
 #   SWAP_FEE_FOR_LP_RATIO        the part the pair keeps for liquidity providers

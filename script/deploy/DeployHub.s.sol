@@ -16,10 +16,12 @@ import {LOVE20Hub} from "../../src/LOVE20Hub.sol";
 ///      The Hub takes one injected dependency (`Stake`) and derives the rest, so a wrong `Stake` is the
 ///      only way to deploy a wrong Hub — that is what the address-book cross-check rules out.
 ///
-///      On top of that, the two fee ratios are deployment inputs, and getting them wrong is silent: the
-///      Hub would still work, but its swap sizing and its LP projection would be off for that DEX. So
-///      before broadcasting, this script re-derives the swap fee from the DEX itself by asking the router
-///      for a real quote and inverting `getAmountOut`:
+///      The DEX fee profile is not a Hub input: Stake stores it and the Hub copies it, so the Hub cannot
+///      disagree with the staking maths. What can still go wrong is Stake itself carrying the wrong
+///      profile for the DEX it points at, and that is silent: the Hub would still work, but its swap
+///      sizing and its LP projection would be off. So before broadcasting, this script (a) asserts that
+///      Stake reports the profile the operator expected, and (b) re-derives the swap fee from the DEX
+///      itself by asking the router for a real quote and inverting `getAmountOut`:
 ///
 ///        y = x*F*rOut / (rIn*D + x*F)   =>   F/D = y*rIn / (x*(rOut - y))
 ///
@@ -30,8 +32,11 @@ contract DeployHub is Script {
     struct HubConfig {
         uint256 chainId;
         address stake;
-        uint256 swapFeeForLpRatio;
-        uint256 swapFeeForProtocolRatio;
+        // The fee profile is not configured here: Stake stores it and the Hub copies it. These are the
+        // values Stake is expected to report, kept only so the deployment can assert it read what the
+        // operator intended.
+        uint256 expectedSwapFeeForLpRatio;
+        uint256 expectedSwapFeeForProtocolRatio;
         address expectedRouter;
         address expectedPairFactory;
         address expectedLaunch;
@@ -48,7 +53,7 @@ contract DeployHub is Script {
         _validateFeeRatiosAgainstTheDex(config);
 
         vm.startBroadcast();
-        LOVE20Hub hub = new LOVE20Hub(config.stake, config.swapFeeForLpRatio, config.swapFeeForProtocolRatio);
+        LOVE20Hub hub = new LOVE20Hub(config.stake);
         vm.stopBroadcast();
 
         _validateDeployment(config, hub);
@@ -59,8 +64,8 @@ contract DeployHub is Script {
     function _loadConfig() internal view returns (HubConfig memory config) {
         config.chainId = vm.envUint("CHAIN_ID");
         config.stake = vm.envAddress("STAKE_ADDRESS");
-        config.swapFeeForLpRatio = vm.envUint("SWAP_FEE_FOR_LP_RATIO");
-        config.swapFeeForProtocolRatio = vm.envUint("SWAP_FEE_FOR_PROTOCOL_RATIO");
+        config.expectedSwapFeeForLpRatio = vm.envUint("SWAP_FEE_FOR_LP_RATIO");
+        config.expectedSwapFeeForProtocolRatio = vm.envUint("SWAP_FEE_FOR_PROTOCOL_RATIO");
         config.expectedRouter = vm.envAddress("ROUTER_ADDRESS");
         config.expectedPairFactory = vm.envAddress("PAIR_FACTORY_ADDRESS");
         config.expectedLaunch = vm.envAddress("LAUNCH_ADDRESS");
@@ -78,15 +83,25 @@ contract DeployHub is Script {
         require(block.chainid == config.chainId, "Chain ID mismatch");
         require(config.stake.code.length != 0, "Stake must be a deployed contract");
 
-        // The same bounds the constructor enforces, checked here so a bad parameter file fails with a
-        // readable message instead of a bare revert from the constructor.
-        require(config.swapFeeForLpRatio > 0, "SWAP_FEE_FOR_LP_RATIO must be non-zero");
+        IStake stake = IStake(config.stake);
+
+        // The profile lives in Stake now, so this compares what Stake reports against what the operator
+        // expected rather than validating a local copy. A mismatch means Stake was deployed with a
+        // different DEX profile, which would make every Hub quote wrong in a way that is hard to see.
         require(
-            config.swapFeeForLpRatio + config.swapFeeForProtocolRatio < 1e18,
+            stake.SWAP_FEE_FOR_LP_RATIO() == config.expectedSwapFeeForLpRatio,
+            "Stake SWAP_FEE_FOR_LP_RATIO differs from the expected profile"
+        );
+        require(
+            stake.SWAP_FEE_FOR_PROTOCOL_RATIO() == config.expectedSwapFeeForProtocolRatio,
+            "Stake SWAP_FEE_FOR_PROTOCOL_RATIO differs from the expected profile"
+        );
+        require(config.expectedSwapFeeForLpRatio > 0, "SWAP_FEE_FOR_LP_RATIO must be non-zero");
+        require(
+            config.expectedSwapFeeForLpRatio + config.expectedSwapFeeForProtocolRatio < 1e18,
             "swap fee ratios must sum to less than 1e18"
         );
 
-        IStake stake = IStake(config.stake);
         address routerAddress = stake.ROUTER_ADDRESS();
         address pairFactoryAddress = stake.PAIR_FACTORY_ADDRESS();
         address launchAddress = stake.LAUNCH_ADDRESS();
@@ -158,7 +173,7 @@ contract DeployHub is Script {
 
         // F/D = y*rIn / (x*(rOut - y)); compare the configured ratio against it after cross-multiplying so
         // the comparison stays integral.
-        uint256 configuredFee = 1e18 - config.swapFeeForLpRatio - config.swapFeeForProtocolRatio;
+        uint256 configuredFee = 1e18 - config.expectedSwapFeeForLpRatio - config.expectedSwapFeeForProtocolRatio;
         // The probe size is deliberately a fraction of the reserve so the quote stays large; the ratio is
         // then compared by cross-multiplication, which keeps the comparison integral. `probeIn` is a
         // division result, so both sides are scaled the same way — the scaling cancels in the comparison
@@ -205,8 +220,16 @@ contract DeployHub is Script {
         require(hub.LAUNCH_ADDRESS() == config.expectedLaunch, "Launch mismatch");
         require(hub.MEMBER_NFT_ADDRESS() == config.expectedMemberNFT, "Member NFT mismatch");
         require(hub.WRAPPED_NATIVE_ADDRESS() == config.expectedWrappedNative, "Wrapped native mismatch");
-        require(hub.SWAP_FEE_FOR_LP_RATIO() == config.swapFeeForLpRatio, "LP fee ratio mismatch");
-        require(hub.SWAP_FEE_FOR_PROTOCOL_RATIO() == config.swapFeeForProtocolRatio, "Protocol fee ratio mismatch");
+        // The Hub copies the profile from Stake, so these assertions catch a Stake that was deployed
+        // with a different profile than the operator expected.
+        require(
+            hub.SWAP_FEE_FOR_LP_RATIO() == config.expectedSwapFeeForLpRatio,
+            "Hub LP fee ratio differs from the expected profile"
+        );
+        require(
+            hub.SWAP_FEE_FOR_PROTOCOL_RATIO() == config.expectedSwapFeeForProtocolRatio,
+            "Hub protocol fee ratio differs from the expected profile"
+        );
     }
 
     function _logDeploymentSummary(address hubAddress) internal pure {

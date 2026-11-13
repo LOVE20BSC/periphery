@@ -73,17 +73,20 @@ abstract contract HubTestBase is Test {
         memberNFT = new MockMemberNFT();
         launch = new MockLaunch();
 
+        (uint256 lpRatio, uint256 protocolRatio) = DexProfile.localDex();
         stake = new MockStake(
             address(memberNFT),
             address(launch),
             address(router),
             address(factory),
             PHASES_MIN,
-            PHASES_MAX
+            PHASES_MAX,
+            lpRatio,
+            protocolRatio
         );
 
-        (uint256 lpRatio, uint256 protocolRatio) = DexProfile.localDex();
-        hub = new LOVE20Hub(address(stake), lpRatio, protocolRatio);
+        // The Hub reads the profile from Stake, so it is no longer a constructor input.
+        hub = new LOVE20Hub(address(stake));
 
         memberNFT.mint(MEMBER_ID, alice);
         memberNFT.mint(OTHER_MEMBER_ID, bob);
@@ -116,7 +119,58 @@ abstract contract HubTestBase is Test {
         factory.setFeeTo(protocolRatio == 0 ? address(0) : address(0xFEE));
         factory.configurePair(address(pair));
 
-        hub = new LOVE20Hub(address(stake), lpRatio, protocolRatio);
+        // `_setDexProfile` re-points the DEX; the Hub copies the profile from Stake at construction,
+        // so Stake has to carry it. The mock's ratios are immutable, hence a fresh Stake.
+        _setStakeProfile(lpRatio, protocolRatio);
+        hub = new LOVE20Hub(address(stake));
+    }
+
+    /// @dev Builds a Hub against a Stake carrying an arbitrary fee profile, so the constructor's
+    ///      validation can be exercised now that the profile is no longer a Hub input. The Stake is
+    ///      created first and the expectation armed immediately before the Hub, because `expectRevert`
+    ///      only covers the next call.
+    function _expectHubRejectsProfile(uint256 lpRatio, uint256 protocolRatio) internal {
+        MockStake bad = new MockStake(
+            address(memberNFT),
+            address(launch),
+            address(router),
+            address(factory),
+            PHASES_MIN,
+            PHASES_MAX,
+            lpRatio,
+            protocolRatio
+        );
+        vm.expectRevert();
+        new LOVE20Hub(address(bad));
+    }
+
+    function _hubAgainstProfile(uint256 lpRatio, uint256 protocolRatio) internal returns (LOVE20Hub) {
+        MockStake bad = new MockStake(
+            address(memberNFT),
+            address(launch),
+            address(router),
+            address(factory),
+            PHASES_MIN,
+            PHASES_MAX,
+            lpRatio,
+            protocolRatio
+        );
+        return new LOVE20Hub(address(bad));
+    }
+
+    function _setStakeProfile(uint256 lpRatio, uint256 protocolRatio) internal {
+        stake = new MockStake(
+            address(memberNFT),
+            address(launch),
+            address(router),
+            address(factory),
+            PHASES_MIN,
+            PHASES_MAX,
+            lpRatio,
+            protocolRatio
+        );
+        stake.setPair(address(token), address(pair));
+        stake.setParentToken(address(token), address(wbnb));
     }
 
     function _reduced(uint256 numerator, uint256 denominator) internal pure returns (uint256, uint256) {

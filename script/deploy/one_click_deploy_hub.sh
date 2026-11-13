@@ -62,7 +62,7 @@ if [ -f "$ADDRESS_FILE" ]; then
     had_address_file=1
 fi
 
-# Step 1: deploy the Hub (loads its own deployment inputs). The address file is written only after every
+# Step 1: deploy the Hub (loads its own check inputs; the DEX profile comes from Stake). The address file is written only after every
 # check passes, but an already broadcast contract cannot be rolled back: after a post-broadcast failure,
 # recover the record from the log and the broadcast artifact that 11_deploy_hub.sh prints.
 bash "$SCRIPT_DIR/11_deploy_hub.sh" "$network"

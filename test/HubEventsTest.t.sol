@@ -10,6 +10,7 @@ import {
     AddLiquidityWithNativeParams
 } from "../src/interfaces/ILOVE20Hub.sol";
 import {MockERC20} from "./mocks/HubMocks.sol";
+import {MockStake} from "./mocks/MockStake.sol";
 import {HubTestBase} from "./HubTestBase.sol";
 
 /// @dev Construction: exactly one injected dependency, everything else derived through it, all immutable
@@ -33,41 +34,40 @@ contract ConstructionTest is HubTestBase {
         assertFalse(hasInitialized, "no initialized flag");
     }
 
-    /// @dev The fee ratios are deployment inputs, so they have to be readable back and must reject values
-    ///      that would make the swap maths overflow or the fee non-positive.
-    function testExposesTheConfiguredFeeRatios() public view {
+    /// @dev The fee ratios are read from Stake and must be readable back unchanged.
+    function testExposesTheFeeRatiosItReadFromStake() public view {
+        assertEq(hub.SWAP_FEE_FOR_LP_RATIO(), stake.SWAP_FEE_FOR_LP_RATIO(), "copied from Stake");
+        assertEq(hub.SWAP_FEE_FOR_PROTOCOL_RATIO(), stake.SWAP_FEE_FOR_PROTOCOL_RATIO(), "copied from Stake");
         assertEq(hub.SWAP_FEE_FOR_LP_RATIO(), 3_000_000_000_000_000, "local dex keeps 0.30%");
         assertEq(hub.SWAP_FEE_FOR_PROTOCOL_RATIO(), 0, "local dex takes no protocol fee");
     }
 
     function testRejectsAZeroLpFeeRatio() public {
+        MockStake bad = new MockStake(
+            address(memberNFT), address(launch), address(router), address(factory), PHASES_MIN, PHASES_MAX, 0, 0
+        );
         vm.expectRevert(
             abi.encodeWithSelector(ILOVE20HubErrors.InvalidFeeRatios.selector, uint256(0), uint256(0))
         );
-        new LOVE20Hub(address(stake), 0, 0);
+        new LOVE20Hub(address(bad));
     }
 
     function testRejectsFeeRatiosThatConsumeTheWholeAmount() public {
-        vm.expectRevert();
-        new LOVE20Hub(address(stake), 5e17, 5e17);
+        _expectHubRejectsProfile(5e17, 5e17);
     }
 
     function testRejectsFeeRatiosWhoseSumBreaksTheSwapMaths() public {
         // A 0.01% fee reduces to F/D = 9999/10000, so F+D = 19999 which is still fine; a fee ratio that
         // reduces to a sum above 65536 would overflow the closed form at uint112 reserves. 1 wei out of
         // 1e18 reduces to F/D = 999999999999999999/1e18, sum 1999999999999999999 — far past the bound.
-        vm.expectRevert();
-        new LOVE20Hub(address(stake), 1, 0);
+        _expectHubRejectsProfile(1, 0);
     }
 
     /// @dev The real profiles all construct successfully, which is the property that matters.
     function testAcceptsEveryRealDexProfile() public {
-        (uint256 lp, uint256 protocol) = (2_500_000_000_000_000, 500_000_000_000_000);
-        new LOVE20Hub(address(stake), lp, protocol);
-        (lp, protocol) = (1_700_000_000_000_000, 800_000_000_000_000);
-        new LOVE20Hub(address(stake), lp, protocol);
-        (lp, protocol) = (1_500_000_000_000_000, 500_000_000_000_000);
-        new LOVE20Hub(address(stake), lp, protocol);
+        _hubAgainstProfile(2_500_000_000_000_000, 500_000_000_000_000);
+        _hubAgainstProfile(1_700_000_000_000_000, 800_000_000_000_000);
+        _hubAgainstProfile(1_500_000_000_000_000, 500_000_000_000_000);
     }
 }
 

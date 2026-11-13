@@ -227,7 +227,7 @@ script/deploy/31_verify_hub.sh <network>          # 开源验证（按 VERIFY_SK
 | --- | --- |
 | `.account` | keystore 账户与密码（**不入库**，模板见 `.account.example`） |
 | `network.params` | `CHAIN_ID`、`RPC_URL`、`ETHERSCAN_API_KEY` |
-| `hub.params` | 本模块的 DEX 费率 profile：`SWAP_FEE_FOR_LP_RATIO` / `SWAP_FEE_FOR_PROTOCOL_RATIO`，以及可选的 `SWAP_FEE_PROBE_TOKEN`（广播前交叉校验用） |
+| `hub.params` | DEX 费率 profile 的**期望值**（`SWAP_FEE_FOR_LP_RATIO` / `SWAP_FEE_FOR_PROTOCOL_RATIO`）：权威来源是 `core.params`（Stake 存它），部署脚本断言 Stake 报告的值与之一致；另有可选的 `SWAP_FEE_PROBE_TOKEN`（广播前用真实报价反推费率做交叉校验） |
 | `addresses.core.params` | 依赖方 `core` 的地址簿（从 `core` 复制） |
 | `addresses.uniswapv2.params` | 依赖方 DEX 的 Router / Factory / WrappedNative（从 `dex` 复制） |
 | `addresses.hub.params` | 本模块部署产物（`HUB_ADDRESS`） |
