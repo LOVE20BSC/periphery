@@ -59,9 +59,9 @@ stakeAddress
 
 全部 `immutable` + 全大写。没有 `init`、没有 `initialized`。
 
-**费率必须是部署参数**：Hub 可能指向任意 Uniswap V2 兼容 DEX，而各家的费率不同，且**协议抽成公式
-只能从 `Mint` 事件反推、`view` 调用拿不到**，所以无法在运行时可靠探测。两个参数按「手续费的两个
-去向」表达，都是 1e18 定点：
+**费率不是 Hub 的参数**：Hub 构造函数只收 `STAKE_ADDRESS`，两个费率从 `Stake` 读取。`Stake` 本来就需要
+这两个值来预测 pair 的 `_mintFee`，所以它才是唯一来源；Hub 复制一份，两个合约就不可能配到不一致的
+档案上。两个值按「手续费的两个去向」表达，都是 1e18 定点：
 
 | 参数 | 含义 | 本地 `dex` | Uniswap V2 | Pancake 主网 | Pancake 测试网 |
 | --- | --- | --- | --- | --- | --- |
@@ -72,8 +72,9 @@ stakeAddress
 这个形状不是审美选择：三个已知 profile 的两个值**全部是 1e18 精确整数**，而 `k/(a+k)` 形式下
 Uniswap 的 `1/6` 除不尽。swap 费率由 `1e18 − (lp + proto)` 推出，不需要第三个参数。
 
-派生结果与两个费率由 `DeployHub.s.sol` 在**广播前**逐项复核（并用一次真实的 `getAmountsOut` 反解
-交叉验证费率），`21_check_hub.sh` 在部署后独立再复核一次。
+权威配置在 `core.params`（`Stake` 部署时写入）。`hub.params` 不再含这两个 key；`DeployHub.s.sol` 在
+**广播前**读 `Stake` 的值做边界校验，并用一次真实的 `getAmountsOut` 反解交叉验证费率是否与 `Stake`
+一致；`21_check_hub.sh` 在部署后断言 Hub 报告的值等于 `Stake` 的值。
 
 ### 协议抽成公式
 

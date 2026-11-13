@@ -1,32 +1,23 @@
 # Parameters for the LOVE20Hub module.
 #
 # The Hub takes one injected dependency (STAKE_ADDRESS, which lives in addresses.core.params) and derives
-# Router / Factory / Launch / MemberNFT / WrappedNative from it. The DEX fee profile is no longer a Hub
-# input either: Stake stores it (it needs the same two ratios to predict the pair's `_mintFee`) and the
-# Hub copies it at construction, so there is one source of truth.
+# Router / Factory / Launch / MemberNFT / WrappedNative from it. The DEX fee profile is not a Hub input
+# either: Stake stores it (it needs the same two ratios to predict the pair's `_mintFee`) and the Hub
+# copies it at construction. There is therefore nothing left to configure here - the profile lives in
+# core.params, next to the Stake that owns it.
 #
-# The two values below are therefore an EXPECTATION, not a setting: the deploy script asserts that Stake
-# reports exactly these before broadcasting. They must stay in sync with core.params, which is where the
-# profile is actually configured.
+# Reference profiles, for choosing what to put in core.params (not used by this network):
 #
-# Two 1e18 ratios describe the swap fee by where it goes:
-#   SWAP_FEE_FOR_LP_RATIO        the part the pair keeps for liquidity providers
-#   SWAP_FEE_FOR_PROTOCOL_RATIO  the part the DEX protocol takes out of it (0 = protocol fee disabled)
-# The swap fee actually charged is their sum, and it is what the constant-product swap maths uses.
+#   Uniswap V2 (local dex)  3000000000000000 / 0               (0.30% total, feeTo permanently zero)
+#   Uniswap V2 with feeTo   2500000000000000 / 500000000000000 (0.30% total, 1/6 of sqrt(k) growth)
+#   PancakeSwap mainnet     1700000000000000 / 800000000000000 (0.25% total: 0.17% LP + 0.08% protocol)
+#   PancakeSwap testnet     1500000000000000 / 500000000000000 (0.20% total: 0.15% LP + 0.05% protocol)
 #
-# This profile is the local `dex` repository: 0.30% swap fee, protocol fee permanently off (its Factory is
-# deployed with `feeToSetter = address(0)`, so `feeTo` can never be set).
-SWAP_FEE_FOR_LP_RATIO=3000000000000000
-SWAP_FEE_FOR_PROTOCOL_RATIO=0
+# The local `dex` repository charges 0.30% and its Factory is deployed with `feeToSetter = address(0)`, so
+# `feeTo` can never be set and no protocol fee is ever minted.
 
 # Optional cross-check: a token that forms a funded pair with the wrapped native token. The deploy script
 # inverts one real `getAmountsOut` quote against this pair and aborts when the recovered swap fee disagrees
-# with the two ratios above. Left empty on the local chain because the Hub may be deployed before any pool
-# has liquidity; 21_check_hub.sh re-runs the same check when a pair is available.
+# with the profile Stake reports. Left empty on the local chain because the Hub may be deployed before any
+# pool has liquidity; 21_check_hub.sh re-runs the same check when a pair is available.
 SWAP_FEE_PROBE_TOKEN=
-
-# Reference profiles for other deployments (not used by this network):
-#
-#   Uniswap V2          2500000000000000 / 500000000000000   (0.30% total, 1/6 of sqrt(k) growth)
-#   PancakeSwap mainnet 1700000000000000 / 800000000000000   (0.25% total: 0.17% LP + 0.08% protocol)
-#   PancakeSwap testnet 1500000000000000 / 500000000000000   (0.20% total: 0.15% LP + 0.05% protocol)

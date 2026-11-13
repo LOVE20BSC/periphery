@@ -157,12 +157,10 @@ verify_binding "LAUNCH_ADDRESS()(address)" "$LAUNCH_ADDRESS"
 verify_binding "MEMBER_NFT_ADDRESS()(address)" "$MEMBER_NFT_ADDRESS"
 verify_binding "WRAPPED_NATIVE_ADDRESS()(address)" "$WRAPPED_NATIVE_ADDRESS"
 
-# The fee profile is copied from Stake at construction, so the Hub must report exactly what Stake stores.
-# hub.params is only an expectation of what Stake should hold; the authoritative pair is Stake's.
+# The fee profile is not configured here at all: Stake owns it and the Hub copies it at construction. The
+# only checkable property is that the copy happened, so the Hub must report exactly what Stake stores.
 stake_lp_ratio=$(cast call "$STAKE_ADDRESS" "SWAP_FEE_FOR_LP_RATIO()(uint256)" --rpc-url "$RPC_URL" 2>/dev/null || true)
 stake_protocol_ratio=$(cast call "$STAKE_ADDRESS" "SWAP_FEE_FOR_PROTOCOL_RATIO()(uint256)" --rpc-url "$RPC_URL" 2>/dev/null || true)
-verify_value "Stake.SWAP_FEE_FOR_LP_RATIO" "$SWAP_FEE_FOR_LP_RATIO" "$stake_lp_ratio"
-verify_value "Stake.SWAP_FEE_FOR_PROTOCOL_RATIO" "$SWAP_FEE_FOR_PROTOCOL_RATIO" "$stake_protocol_ratio"
 hub_lp_ratio=$(cast call "$HUB_ADDRESS" "SWAP_FEE_FOR_LP_RATIO()(uint256)" --rpc-url "$RPC_URL" 2>/dev/null || true)
 hub_protocol_ratio=$(cast call "$HUB_ADDRESS" "SWAP_FEE_FOR_PROTOCOL_RATIO()(uint256)" --rpc-url "$RPC_URL" 2>/dev/null || true)
 verify_value "Hub.SWAP_FEE_FOR_LP_RATIO" "$stake_lp_ratio" "$hub_lp_ratio"
