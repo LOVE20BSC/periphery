@@ -1,0 +1,23 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+      - run: forge build --force --deny warnings
+      - run: forge build --sizes
+      - run: forge lint
+      - run: forge test --summary
+      - run: python3 script/events/check-events.py
+      # Shell-script regressions are invisible to `forge test`; `tools` learned this the same way.
+      - run: python3 test/deploy_scripts_test.py

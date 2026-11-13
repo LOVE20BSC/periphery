@@ -1,0 +1,8 @@
+# Event -> family map, enforced by script/events/check-events.py.
+# Families and slot rules: matt-gov/docs/event-standards.md §6.1.
+# This repository emits exactly one family, `periphery.hub`. The second indexed slot is `memberId` on
+# the stake facts and the recipient `to` on the LP facts; the third is always `caller`.
+HubLiquidityStakedWithToken periphery.hub
+HubLiquidityStakedWithNative periphery.hub
+HubLiquidityAddedWithToken periphery.hub
+HubLiquidityAddedWithNative periphery.hub

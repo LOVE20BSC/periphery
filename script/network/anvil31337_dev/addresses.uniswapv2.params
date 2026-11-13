@@ -1,0 +1,9 @@
+# Uniswap V2 compatible DEX this repository routes through, as deployed by the `dex` repository (or the
+# DEX core points at). Copied from that repository's address book after its deployment; the Hub derives
+# its own router and factory from `Stake`, and 21_check_hub.sh re-reads these two to prove the derivation
+# lands on the same addresses.
+ROUTER_ADDRESS=0x0165878A594ca255338adfa4d48449f69242Eb8F
+PAIR_FACTORY_ADDRESS=0x5FC8d32690cc91D4c39d9d3abcBD16989F875707
+# Root wrapped native token, read from Router.WETH() at deployment time; recorded here so the check step
+# has an independent expectation rather than trusting the same getter twice.
+WRAPPED_NATIVE_ADDRESS=0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9

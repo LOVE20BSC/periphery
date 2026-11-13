@@ -1,0 +1,9 @@
+# Source verification endpoint and opt-out list; shared by every network of this repository.
+# Etherscan V2 serves every supported chain from a single URL with a single API key; a self-hosted or
+# third-party verifier is configured by pointing this URL at it.
+ETHERSCAN_VERIFIER_URL=https://api.etherscan.io/api
+
+# Comma-separated chain IDs that never run the verify step. Verification is attempted by default, so a
+# chain missing from this list fails loudly instead of passing unverified; only chains without a block
+# explorer belong here. 56 and 97 must never appear.
+VERIFY_SKIP_CHAIN_IDS=31337

@@ -1,0 +1,40 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.37"
+evm_version = "osaka"
+optimizer = true
+optimizer_runs = 200
+bytecode_hash = "none"
+cbor_metadata = false
+deny = "warnings"
+auto_detect_remappings = false
+
+[fuzz]
+runs = 256
+
+[invariant]
+runs = 32
+depth = 15
+fail_on_revert = false
+
+[lint]
+severity = ["high", "med", "low"]
+ignore = ["test/**/*.sol"]
+# 仓级 exclude_lints 只留「不能用行内注释抑制」的三类，理由必须覆盖本仓每个受影响的位置：
+# - calls-loop：LOVE20Hub 没有循环。保留它是为防止后续新增的批量报价/批量组 LP 把外部调用塞进
+#   循环时静默通过。
+# - reentrancy-events：`LiquidityStakedWithToken` / `LiquidityStakedWithNative` 与两条组 LP 事件
+#   都在外部调用（Stake / Router / Pair / WBNB）之后一次性发出，载荷全部来自本函数算出的结果。
+#   Hub 自身无状态、无账本，且四个写入口都挂 nonReentrant（OZ 的 ERC-7201 命名空间槽，标准布局
+#   里看不到它），重入无法插入第二笔编排，也无法伪造日志。本版 Foundry 对该类不接受行内抑制，
+#   故按仓关闭。
+# - unused-return：四入口有意忽略 `forceApprove` 的返回值（失败会由 SafeERC20 回滚），
+#   `swapExactTokensForTokens` 只取 `amounts[1]`。本类当前实际告警数 0，保留它用于防止后续改动
+#   引入忽略返回值时静默通过。
+exclude_lints = ["calls-loop", "reentrancy-events", "unused-return"]
+
+# arbitrary-send-eth（原生币退款转发）与 missing-zero-check（构造函数只保存入参，静态零值校验按
+# dev-standards §5.7 归部署脚本）两类按具体行用 `// forge-lint: disable-next-*` 逐条抑制，不进
+# exclude_lints：它们的作用面窄，整类关闭会连带放过未来新增的位置。

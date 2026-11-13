@@ -1,0 +1,9 @@
+/out/
+/cache/
+/broadcast/
+*.bin
+lcov.info
+.DS_Store
+
+# 敏感部署配置
+script/network/**/.account

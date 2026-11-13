@@ -1,0 +1,8 @@
+CHAIN_ID=31337
+RPC_URL=http://127.0.0.1:8545
+
+# Source verification credential, read by 31_verify_hub.sh on chains with an Etherscan V2 endpoint
+# (56, 97). Empty means "not configured": those chains fail the verify step instead of silently skipping
+# it. The key is a credential - never commit a live value; fill it locally or have CI write it before the
+# run. This file is the only source, so an exported ETHERSCAN_API_KEY is ignored.
+ETHERSCAN_API_KEY=
