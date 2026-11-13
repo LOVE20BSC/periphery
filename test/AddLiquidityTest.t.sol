@@ -205,9 +205,15 @@ contract QuoteTest is HubTestBase {
         assertEq(
             quote.suggestedParentTokenAmountMin, quote.usableParentTokenAmount, "suggestion is the usable parent amount"
         );
-        assertEq(quote.preparedTokenAmount - quote.usableTokenAmount, quote.preparedTokenAmount - quote.usableTokenAmount, "self-consistent");
         assertLe(quote.usableTokenAmount, quote.preparedTokenAmount, "conversion never exceeds what was prepared");
         assertLe(quote.usableParentTokenAmount, quote.preparedParentTokenAmount, "conversion never exceeds what was prepared");
+        // At least one side must be fully used: the conversion keeps one side at its desired amount, so the
+        // remainder can only appear on the other one. A quote that trims both sides is a broken conversion.
+        require(
+            quote.usableTokenAmount == quote.preparedTokenAmount
+                || quote.usableParentTokenAmount == quote.preparedParentTokenAmount,
+            "the conversion leaves at least one side untouched"
+        );
     }
 
     function testNativeQuoteUsesTheWrappedNativeSide() public view {

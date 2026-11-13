@@ -80,11 +80,23 @@ interface ILOVE20HubErrors {
     error TokenNotRegistered(address tokenAddress);
     error PairMissing(address tokenAddress);
     error PairEmpty(address tokenAddress);
-    error DeadlineExpired(uint256 blockTimestamp, uint256 deadline);
-    error AmountExceeded(uint256 amount, uint256 maxAmount);
+    error DeadlineExpired(
+        uint256 blockTimestamp,
+        uint256 deadline
+    );
+    error AmountExceeded(
+        uint256 amount,
+        uint256 maxAmount
+    );
     error ZeroSwapOutput();
-    error InsufficientTokenAmount(uint256 amount, uint256 minAmount);
-    error InsufficientParentTokenAmount(uint256 amount, uint256 minAmount);
+    error InsufficientTokenAmount(
+        uint256 amount,
+        uint256 minAmount
+    );
+    error InsufficientParentTokenAmount(
+        uint256 amount,
+        uint256 minAmount
+    );
     error NativeTokenSenderRejected(address sender);
     error NativeRefundFailed();
 }

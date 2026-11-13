@@ -102,9 +102,11 @@ forge build --force --deny warnings
 forge test
 forge lint
 python3 script/events/check-events.py
+python3 test/deploy_scripts_test.py
 ```
 
 `forge build --sizes` 的单合约上限（24,576 字节）同样纳入门禁，见 `.github/workflows/ci.yml`。
+`test/deploy_scripts_test.py` 守的是 shell 脚本的回归（`forge test` 看不到的那一层）。
 
 ## 依赖
 
@@ -113,7 +115,7 @@ python3 script/events/check-events.py
 | 工具 | 用途 |
 | --- | --- |
 | Foundry `1.8.1`+（`forge`） | 编译、测试、lint、脚本 |
-| `python3` | `script/events/check-events.py`；**部署脚本 `script/deploy/11_deploy_hub.sh` 也用它解析 broadcast artifact** |
+| `python3` | `script/events/check-events.py`、`test/deploy_scripts_test.py`；部署脚本 `21_check_hub.sh` 也用它读 ABI |
 
 | 依赖 | 用途 |
 | --- | --- |
