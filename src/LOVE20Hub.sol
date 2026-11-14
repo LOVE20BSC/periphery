@@ -122,7 +122,7 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         _checkPromisedWaitingPhases(params.promisedWaitingPhases);
 
         StakeContext memory context = _stakeContext(params.tokenAddress);
-        _pullExact(params.tokenAddress, params.tokenAmountDesired);
+        IERC20(params.tokenAddress).safeTransferFrom(msg.sender, address(this), params.tokenAmountDesired);
         _pullExact(context.parentTokenAddress, params.parentTokenAmountDesired);
 
         HubAmounts memory amounts = _prepareStake(
@@ -138,7 +138,10 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             params.deadline
         );
 
-        _refundTokens(context.tokenAddress, context.parentTokenAddress, amounts);
+        if (amounts.remainingAmountA > 0) {
+            IERC20(context.tokenAddress).safeTransfer(msg.sender, amounts.remainingAmountA);
+        }
+        _refundToken(context.parentTokenAddress, amounts.remainingAmountB);
 
         emit HubLiquidityStakedWithToken({
             tokenAddress: context.tokenAddress,
@@ -167,7 +170,7 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         _checkNativeParent(params.tokenAddress);
 
         StakeContext memory context = _stakeContext(params.tokenAddress);
-        _pullExact(params.tokenAddress, params.tokenAmountDesired);
+        IERC20(params.tokenAddress).safeTransferFrom(msg.sender, address(this), params.tokenAmountDesired);
         IWrappedNative(WRAPPED_NATIVE_ADDRESS).deposit{value: msg.value}();
 
         HubAmounts memory amounts =
@@ -182,7 +185,10 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             params.deadline
         );
 
-        _refundNativeThenToken(context.tokenAddress, amounts);
+        _refundNative(amounts.remainingAmountB);
+        if (amounts.remainingAmountA > 0) {
+            IERC20(context.tokenAddress).safeTransfer(msg.sender, amounts.remainingAmountA);
+        }
 
         emit HubLiquidityStakedWithNative({
             tokenAddress: context.tokenAddress,
@@ -220,7 +226,8 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             pool, amounts, params.to, params.deadline, params.minLiquidity
         );
 
-        _refundTokens(pool.tokenA, pool.tokenB, amounts);
+        _refundToken(pool.tokenA, amounts.remainingAmountA);
+        _refundToken(pool.tokenB, amounts.remainingAmountB);
 
         emit HubLiquidityAddedWithToken({
             pairAddress: _resolvedPairAddress(pool),
@@ -258,7 +265,8 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             pool, amounts, params.to, params.deadline, params.minLiquidity
         );
 
-        _refundNativeThenToken(pool.tokenA, amounts);
+        _refundNative(amounts.remainingAmountB);
+        _refundToken(pool.tokenA, amounts.remainingAmountA);
 
         emit HubLiquidityAddedWithNative({
             pairAddress: _resolvedPairAddress(pool),
@@ -909,6 +917,10 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
     }
 
     function _pullExact(address tokenAddress, uint256 amount) private {
+        if (tokenAddress == WRAPPED_NATIVE_ADDRESS) {
+            IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), amount);
+            return;
+        }
         uint256 balanceBefore = IERC20(tokenAddress).balanceOf(address(this));
         IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), amount);
         _checkReceived(tokenAddress, address(this), balanceBefore, amount);
@@ -923,23 +935,21 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         IERC20(tokenAddress).forceApprove(spender, amount);
     }
 
-    function _refundTokens(address tokenA, address tokenB, HubAmounts memory amounts) private {
-        _refundToken(tokenA, amounts.remainingAmountA);
-        _refundToken(tokenB, amounts.remainingAmountB);
-    }
-
-    function _refundNativeThenToken(address tokenAddress, HubAmounts memory amounts) private {
-        if (amounts.remainingAmountB > 0) {
-            IWrappedNative(WRAPPED_NATIVE_ADDRESS).withdraw(amounts.remainingAmountB);
+    function _refundNative(uint256 amount) private {
+        if (amount > 0) {
+            IWrappedNative(WRAPPED_NATIVE_ADDRESS).withdraw(amount);
             // forge-lint: disable-next-line(arbitrary-send-eth)
-            (bool success,) = msg.sender.call{value: amounts.remainingAmountB}("");
+            (bool success,) = msg.sender.call{value: amount}("");
             if (!success) revert NativeRefundFailed();
         }
-        _refundToken(tokenAddress, amounts.remainingAmountA);
     }
 
     function _refundToken(address tokenAddress, uint256 amount) private {
         if (amount == 0) return;
+        if (tokenAddress == WRAPPED_NATIVE_ADDRESS) {
+            IERC20(tokenAddress).safeTransfer(msg.sender, amount);
+            return;
+        }
         uint256 balanceBefore = IERC20(tokenAddress).balanceOf(msg.sender);
         IERC20(tokenAddress).safeTransfer(msg.sender, amount);
         _checkReceived(tokenAddress, msg.sender, balanceBefore, amount);
