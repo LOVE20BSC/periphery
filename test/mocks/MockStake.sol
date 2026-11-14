@@ -33,7 +33,7 @@ struct LiquidityStakedPayload {
     uint256 liquiditySharesAdded;
     uint256 liquidityShares;
     uint256 totalLiquidityShares;
-    uint256 totalValidGovVotes;
+    uint256 totalGovVotes;
     uint256 totalWithdrawableLp;
 }
 
@@ -136,7 +136,7 @@ contract MockStake is IStake {
         payload.liquiditySharesAdded = liquiditySharesAdded;
         payload.liquidityShares = previousShares + liquiditySharesAdded;
         payload.totalLiquidityShares = _totalLiquidityShares[tokenAddress];
-        payload.totalValidGovVotes = _totalLiquidityShares[tokenAddress] * promisedWaitingPhases;
+        payload.totalGovVotes = _totalLiquidityShares[tokenAddress] * promisedWaitingPhases;
         payload.totalWithdrawableLp = 0;
         _emitLiquidityStaked(payload);
     }
@@ -191,7 +191,7 @@ contract MockStake is IStake {
             liquiditySharesAdded: payload.liquiditySharesAdded,
             liquidityShares: payload.liquidityShares,
             totalLiquidityShares: payload.totalLiquidityShares,
-            totalValidGovVotes: payload.totalValidGovVotes,
+            totalGovVotes: payload.totalGovVotes,
             totalWithdrawableLp: payload.totalWithdrawableLp
         });
     }
@@ -284,19 +284,19 @@ contract MockStake is IStake {
         return 0;
     }
 
-    function totalValidGovVotes(address, uint256) external pure override returns (uint256) {
+    function totalGovVotes(address, uint256) external pure override returns (uint256) {
         return 0;
     }
 
-    function totalValidGovVotesAdded(address, uint256) external pure override returns (uint256) {
+    function totalGovVotesAdded(address, uint256) external pure override returns (uint256) {
         return 0;
     }
 
-    function totalValidGovVotesRemoved(address, uint256) external pure override returns (uint256) {
+    function totalGovVotesRemoved(address, uint256) external pure override returns (uint256) {
         return 0;
     }
 
-    function validGovVotes(address, uint256, uint256) external pure override returns (uint256) {
+    function govVotes(address, uint256, uint256) external pure override returns (uint256) {
         return 0;
     }
 
