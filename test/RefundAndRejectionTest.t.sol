@@ -6,7 +6,8 @@ import {
     StakeLiquidityWithTokenParams,
     StakeLiquidityWithNativeParams,
     AddLiquidityWithTokenParams,
-    AddLiquidityWithNativeParams
+    AddLiquidityWithNativeParams,
+    LpQuote
 } from "../src/interfaces/ILOVE20Hub.sol";
 import {MockERC20, MockWrappedNative} from "./mocks/HubMocks.sol";
 import {HubTestBase} from "./HubTestBase.sol";
@@ -15,6 +16,60 @@ import {HubTestBase} from "./HubTestBase.sol";
 ///      path returns ERC20, native path returns native), never by an argument, so these cases assert the
 ///      two branches separately and check that the Hub never keeps a balance.
 contract RefundAndRejectionTest is HubTestBase {
+    function testRejectsTaxOnHubInputOrPairDepositWithoutUsingDonations() public {
+        _fundAlice(1000e18, 1000e18);
+        token.mint(address(hub), 100e18);
+        for (uint256 i; i < 2; i++) {
+            token.setTransferFee(i == 0 ? alice : address(hub), i == 0 ? address(hub) : address(pair), 1000);
+            vm.prank(alice);
+            vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.InexactTokenTransfer.selector, address(token), 1000e18, 900e18));
+            hub.addLiquidityWithToken(AddLiquidityWithTokenParams({
+                tokenA: address(token), tokenB: address(wbnb), amountADesired: 1000e18, amountBDesired: 1000e18,
+                minLiquidity: 0, to: alice, deadline: block.timestamp
+            }));
+            assertEq(token.balanceOf(alice), 1000e18, "input restored");
+            assertEq(token.balanceOf(address(hub)), 100e18, "donation untouched");
+        }
+    }
+
+    function testSwapRejectsTaxOnPairInput() public {
+        _fundAlice(1000e18, 0);
+        LpQuote memory quote = hub.quoteLp(address(token), address(wbnb), 1000e18, 0);
+        token.setTransferFee(address(hub), address(pair), 1000);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.InexactTokenTransfer.selector, address(token), quote.amountToSwap, quote.amountToSwap - quote.amountToSwap / 10));
+        hub.addLiquidityWithToken(AddLiquidityWithTokenParams({
+            tokenA: address(token), tokenB: address(wbnb), amountADesired: 1000e18, amountBDesired: 0,
+            minLiquidity: 0, to: alice, deadline: block.timestamp
+        }));
+    }
+
+    function testSwapRejectsTaxOnOutput() public {
+        _fundAlice(0, 1000e18);
+        LpQuote memory quote = hub.quoteLp(address(token), address(wbnb), 0, 1000e18);
+        token.setTransferFee(address(pair), address(hub), 1000);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.InexactTokenTransfer.selector, address(token), quote.amountOutFromSwap, quote.amountOutFromSwap - quote.amountOutFromSwap / 10));
+        hub.addLiquidityWithToken(AddLiquidityWithTokenParams({
+            tokenA: address(token), tokenB: address(wbnb), amountADesired: 0, amountBDesired: 1000e18,
+            minLiquidity: 0, to: alice, deadline: block.timestamp
+        }));
+    }
+
+    function testRefundRejectsTaxInsteadOfSilentlyReducingTheRefund() public {
+        _fundAlice(12_345e18, 123e18);
+        LpQuote memory quote = hub.quoteLp(address(token), address(wbnb), 12_345e18, 123e18);
+        uint256 remainder = quote.preparedAmountA - quote.usableAmountA;
+        assertGt(remainder, 0, "nonzero refund exercises receipt check");
+        token.setTransferFee(address(hub), alice, 10_000);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.InexactTokenTransfer.selector, address(token), remainder, 0));
+        hub.addLiquidityWithToken(AddLiquidityWithTokenParams({
+            tokenA: address(token), tokenB: address(wbnb), amountADesired: 12_345e18, amountBDesired: 123e18,
+            minLiquidity: 0, to: alice, deadline: block.timestamp
+        }));
+    }
+
     function testTokenRefundReturnsErc20WhenTheRatioIsOff() public {
         // Skew the pool so a single-sided input cannot be converted in full: the leftover must come back
         // as the same ERC20 the caller paid with.
@@ -29,8 +84,7 @@ contract RefundAndRejectionTest is HubTestBase {
                 tokenB: address(wbnb),
                 amountADesired: 10_000e18,
                 amountBDesired: 0,
-                amountAMin: 0,
-                amountBMin: 0,
+                minLiquidity: 0,
                 to: alice,
                 deadline: block.timestamp
             })
@@ -49,8 +103,7 @@ contract RefundAndRejectionTest is HubTestBase {
             AddLiquidityWithNativeParams({
                 tokenAddress: address(token),
                 amountTokenDesired: 0,
-                amountTokenMin: 0,
-                amountNativeMin: 0,
+                minLiquidity: 0,
                 to: alice,
                 deadline: block.timestamp
             })
@@ -91,8 +144,7 @@ contract RefundAndRejectionTest is HubTestBase {
             StakeLiquidityWithNativeParams({
                 tokenAddress: address(token),
                 tokenAmountDesired: 10_000e18,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -110,8 +162,7 @@ contract RefundAndRejectionTest is HubTestBase {
                 tokenAddress: address(token),
                 tokenAmountDesired: 1e18,
                 parentTokenAmountDesired: 0,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp - 1
@@ -135,8 +186,7 @@ contract RefundAndRejectionTest is HubTestBase {
                 tokenAddress: address(token),
                 tokenAmountDesired: 10_000e18,
                 parentTokenAmountDesired: 0,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: 999,
                 deadline: block.timestamp
@@ -159,8 +209,7 @@ contract RefundAndRejectionTest is HubTestBase {
             StakeLiquidityWithNativeParams({
                 tokenAddress: address(child),
                 tokenAmountDesired: 0,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -197,8 +246,7 @@ contract RefundAndRejectionTest is HubTestBase {
                 tokenB: address(wbnb),
                 amountADesired: 1_000e18,
                 amountBDesired: 1_000e18,
-                amountAMin: 0,
-                amountBMin: 0,
+                minLiquidity: 0,
                 to: alice,
                 deadline: block.timestamp
             })

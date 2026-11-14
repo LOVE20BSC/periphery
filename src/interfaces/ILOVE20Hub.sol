@@ -7,8 +7,7 @@ struct StakeLiquidityWithTokenParams {
     address tokenAddress;
     uint256 tokenAmountDesired;
     uint256 parentTokenAmountDesired;
-    uint256 tokenAmountMin;
-    uint256 parentTokenAmountMin;
+    uint256 minLiquidityShares;
     uint256 promisedWaitingPhases;
     uint256 memberId;
     uint256 deadline;
@@ -17,8 +16,7 @@ struct StakeLiquidityWithTokenParams {
 struct StakeLiquidityWithNativeParams {
     address tokenAddress;
     uint256 tokenAmountDesired;
-    uint256 tokenAmountMin;
-    uint256 parentTokenAmountMin;
+    uint256 minLiquidityShares;
     uint256 promisedWaitingPhases;
     uint256 memberId;
     uint256 deadline;
@@ -29,8 +27,7 @@ struct AddLiquidityWithTokenParams {
     address tokenB;
     uint256 amountADesired;
     uint256 amountBDesired;
-    uint256 amountAMin;
-    uint256 amountBMin;
+    uint256 minLiquidity;
     address to;
     uint256 deadline;
 }
@@ -38,8 +35,7 @@ struct AddLiquidityWithTokenParams {
 struct AddLiquidityWithNativeParams {
     address tokenAddress;
     uint256 amountTokenDesired;
-    uint256 amountTokenMin;
-    uint256 amountNativeMin;
+    uint256 minLiquidity;
     address to;
     uint256 deadline;
 }
@@ -56,8 +52,6 @@ struct LpQuote {
     uint256 usableAmountA;
     uint256 usableAmountB;
     uint256 expectedLiquidity;
-    uint256 suggestedAmountAMin;
-    uint256 suggestedAmountBMin;
 }
 
 struct StakeLiquidityQuote {
@@ -75,8 +69,6 @@ struct StakeLiquidityQuote {
     uint256 liquiditySharesAdded;
     uint256 liquidityShares;
     uint256 govVotesAdded;
-    uint256 suggestedTokenAmountMin;
-    uint256 suggestedParentAmountMin;
 }
 
 interface ILOVE20HubErrors {
@@ -104,22 +96,9 @@ interface ILOVE20HubErrors {
         uint256 maxAmount
     );
     error ZeroSwapOutput();
-    error InsufficientTokenAmount(
-        uint256 amount,
-        uint256 minAmount
-    );
-    error InsufficientParentTokenAmount(
-        uint256 amount,
-        uint256 minAmount
-    );
-    error InsufficientAmountA(
-        uint256 amount,
-        uint256 minAmount
-    );
-    error InsufficientAmountB(
-        uint256 amount,
-        uint256 minAmount
-    );
+    error InexactTokenTransfer(address tokenAddress, uint256 expected, uint256 received);
+    error InsufficientLiquidity(uint256 liquidity, uint256 minLiquidity);
+    error InsufficientLiquidityShares(uint256 shares, uint256 minShares);
     error InvalidPromisedWaitingPhases(
         uint256 value,
         uint256 minPhases,

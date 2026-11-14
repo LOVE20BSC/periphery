@@ -37,8 +37,7 @@ contract AddLiquidityTest is HubTestBase {
                 tokenB: address(wbnb),
                 amountADesired: 10_000e18,
                 amountBDesired: 0,
-                amountAMin: 0,
-                amountBMin: 0,
+                minLiquidity: 0,
                 to: bob,
                 deadline: block.timestamp
             })
@@ -73,8 +72,7 @@ contract AddLiquidityTest is HubTestBase {
                 tokenB: address(wbnb),
                 amountADesired: 10_000e18,
                 amountBDesired: 1_000e18,
-                amountAMin: 0,
-                amountBMin: 0,
+                minLiquidity: 0,
                 to: alice,
                 deadline: block.timestamp
             })
@@ -99,8 +97,7 @@ contract AddLiquidityTest is HubTestBase {
             AddLiquidityWithNativeParams({
                 tokenAddress: address(token),
                 amountTokenDesired: 0,
-                amountTokenMin: 0,
-                amountNativeMin: 0,
+                minLiquidity: 0,
                 to: bob,
                 deadline: block.timestamp
             })
@@ -137,8 +134,7 @@ contract AddLiquidityTest is HubTestBase {
                 tokenB: address(wbnb),
                 amountADesired: 1_000e18,
                 amountBDesired: 1_000e18,
-                amountAMin: 0,
-                amountBMin: 0,
+                minLiquidity: 0,
                 to: alice,
                 deadline: block.timestamp
             })
@@ -170,8 +166,7 @@ contract AddLiquidityTest is HubTestBase {
                 tokenB: address(wbnb),
                 amountADesired: 1_000e18,
                 amountBDesired: 1_000e18,
-                amountAMin: 0,
-                amountBMin: 0,
+                minLiquidity: 0,
                 to: alice,
                 deadline: block.timestamp
             })
@@ -184,57 +179,26 @@ contract AddLiquidityTest is HubTestBase {
         assertEq(pairKey, createdPair, "event reports the pair that now exists");
     }
 
-    function testAddLiquidityWithTokenRevertsBelowAmountAMin() public {
+    function testAddLiquidityWithTokenRejectsLpBelowMinimum() public {
         _fundAlice(10_000e18, 10_000e18);
-
+        LpQuote memory quote = hub.quoteLp(address(token), address(wbnb), 10_000e18, 1e18);
         vm.prank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ILOVE20HubErrors.InsufficientAmountA.selector,
-                uint256(5_005_448_526_179_952_481_115),
-                type(uint256).max
-            )
-        );
-        hub.addLiquidityWithToken(
-            AddLiquidityWithTokenParams({
-                tokenA: address(token),
-                tokenB: address(wbnb),
-                amountADesired: 10_000e18,
-                amountBDesired: 1e18,
-                amountAMin: type(uint256).max,
-                amountBMin: 0,
-                to: alice,
-                deadline: block.timestamp
-            })
-        );
+        vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.InsufficientLiquidity.selector, quote.expectedLiquidity, quote.expectedLiquidity + 1));
+        hub.addLiquidityWithToken(AddLiquidityWithTokenParams({
+            tokenA: address(token), tokenB: address(wbnb), amountADesired: 10_000e18, amountBDesired: 1e18,
+            minLiquidity: quote.expectedLiquidity + 1, to: alice, deadline: block.timestamp
+        }));
     }
 
-    function testAddLiquidityWithTokenRevertsBelowAmountBMin() public {
-        _fundAlice(10_000e18, 10_000e18);
-
-        // A small A side against a large B side on a 1:1 pool: balancing swaps most of B into A, so the
-        // amount that actually enters the B side is the small one. The A side clears its minimum, which
-        // is what makes this the B branch rather than the A branch.
+    function testAddLiquidityWithNativeRejectsLpBelowMinimum() public {
+        vm.deal(alice, 10_000e18);
+        LpQuote memory quote = hub.quoteLpWithNative(address(token), 0, 10_000e18);
         vm.prank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ILOVE20HubErrors.InsufficientAmountB.selector,
-                uint256(5_005_448_526_179_952_481_115),
-                type(uint256).max
-            )
-        );
-        hub.addLiquidityWithToken(
-            AddLiquidityWithTokenParams({
-                tokenA: address(token),
-                tokenB: address(wbnb),
-                amountADesired: 1e18,
-                amountBDesired: 10_000e18,
-                amountAMin: 0,
-                amountBMin: type(uint256).max,
-                to: alice,
-                deadline: block.timestamp
-            })
-        );
+        vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.InsufficientLiquidity.selector, quote.expectedLiquidity, quote.expectedLiquidity + 1));
+        hub.addLiquidityWithNative{value: 10_000e18}(AddLiquidityWithNativeParams({
+            tokenAddress: address(token), amountTokenDesired: 0, minLiquidity: quote.expectedLiquidity + 1,
+            to: alice, deadline: block.timestamp
+        }));
     }
 
     function testAddLiquidityWithTokenRequiresRecipient() public {
@@ -248,8 +212,7 @@ contract AddLiquidityTest is HubTestBase {
                 tokenB: address(wbnb),
                 amountADesired: 10_000e18,
                 amountBDesired: 0,
-                amountAMin: 0,
-                amountBMin: 0,
+                minLiquidity: 0,
                 to: address(0),
                 deadline: block.timestamp
             })
@@ -270,16 +233,13 @@ contract AddLiquidityTest is HubTestBase {
                 tokenB: address(wbnb),
                 amountADesired: 10_000e18,
                 amountBDesired: 1_000e18,
-                amountAMin: quote.suggestedAmountAMin,
-                amountBMin: quote.suggestedAmountBMin,
+                minLiquidity: quote.expectedLiquidity,
                 to: alice,
                 deadline: block.timestamp
             })
         );
 
         assertEq(liquidity, quote.expectedLiquidity, "quote predicts the realized LP");
-        assertEq(quote.suggestedAmountAMin, quote.usableAmountA, "suggestion is the usable A amount");
-        assertEq(quote.suggestedAmountBMin, quote.usableAmountB, "suggestion is the usable B amount");
         assertLe(quote.usableAmountA, quote.preparedAmountA, "conversion never exceeds what was prepared");
         assertLe(quote.usableAmountB, quote.preparedAmountB, "conversion never exceeds what was prepared");
     }
@@ -303,8 +263,7 @@ contract AddLiquidityTest is HubTestBase {
                     tokenB: address(wbnb),
                     amountADesired: 10_000e18,
                     amountBDesired: 1_000e18,
-                    amountAMin: 0,
-                    amountBMin: 0,
+                    minLiquidity: 0,
                     to: alice,
                     deadline: block.timestamp
                 })
@@ -319,10 +278,6 @@ contract AddLiquidityTest is HubTestBase {
             address(token), 10_000e18, 1_000e18, MEMBER_ID, PROMISED_WAITING_PHASES
         );
 
-        assertEq(quote.suggestedTokenAmountMin, quote.usableTokenAmount, "suggestion is the usable token amount");
-        assertEq(
-            quote.suggestedParentAmountMin, quote.usableParentTokenAmount, "suggestion is the usable parent amount"
-        );
         assertLe(quote.usableTokenAmount, quote.preparedTokenAmount, "conversion never exceeds what was prepared");
         assertLe(
             quote.usableParentTokenAmount, quote.preparedParentTokenAmount, "conversion never exceeds what was prepared"
@@ -385,8 +340,7 @@ contract AddLiquidityTest is HubTestBase {
                 tokenB: address(wbnb),
                 amountADesired: 10_000e18,
                 amountBDesired: 10_000e18,
-                amountAMin: 0,
-                amountBMin: 0,
+                minLiquidity: 0,
                 to: alice,
                 deadline: block.timestamp
             })

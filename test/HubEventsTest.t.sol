@@ -115,8 +115,7 @@ contract HubEventTest is HubTestBase {
                 tokenAddress: address(token),
                 tokenAmountDesired: 10_000e18,
                 parentTokenAmountDesired: 0,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -156,8 +155,7 @@ contract HubEventTest is HubTestBase {
                 tokenAddress: address(token),
                 tokenAmountDesired: 10_000e18,
                 parentTokenAmountDesired: 0,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -186,8 +184,7 @@ contract HubEventTest is HubTestBase {
                 tokenAddress: address(token),
                 tokenAmountDesired: 10_000e18,
                 parentTokenAmountDesired: 0,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -213,8 +210,7 @@ contract HubEventTest is HubTestBase {
                 tokenB: address(wbnb),
                 amountADesired: 10_000e18,
                 amountBDesired: 0,
-                amountAMin: 0,
-                amountBMin: 0,
+                minLiquidity: 0,
                 to: bob,
                 deadline: block.timestamp
             })
@@ -241,8 +237,7 @@ contract HubEventTest is HubTestBase {
             AddLiquidityWithNativeParams({
                 tokenAddress: address(token),
                 amountTokenDesired: 0,
-                amountTokenMin: 0,
-                amountNativeMin: 0,
+                minLiquidity: 0,
                 to: bob,
                 deadline: block.timestamp
             })

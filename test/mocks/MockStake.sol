@@ -92,8 +92,10 @@ contract MockStake is IStake {
         uint256 tokenAmount,
         uint256 parentTokenAmount,
         uint256 promisedWaitingPhases,
-        uint256 memberId
+        uint256 memberId,
+        uint256 deadline
     ) external override returns (uint256 govVotesAdded, uint256 liquiditySharesAdded) {
+        if (block.timestamp > deadline) revert DeadlineExpired(deadline);
         if (tokenAmount == 0) revert ZeroTokenAmount();
         if (parentTokenAmount == 0) revert ZeroParentTokenAmount();
         if (
@@ -320,13 +322,23 @@ contract MockStake is IStake {
 
     function settleFees(address) external override {}
 
-    function stakeBoost(address, uint256, uint256, uint256) external pure override returns (uint256) {
+    function lastMajorStakeRound(address, uint256) external pure override returns (uint256) { return 0; }
+
+    function increasePromisedWaitingPhases(address tokenAddress, uint256 memberId, uint256 phases) external override returns (uint256 added) {
+        require(msg.sender == _ownerOf(memberId), "owner");
+        uint256 previous = _promisedWaitingPhasesByMemberId[tokenAddress][memberId];
+        require(phases >= previous, "cannot decrease");
+        added = _liquiditySharesByMemberId[tokenAddress][memberId] * (phases - previous);
+        _promisedWaitingPhasesByMemberId[tokenAddress][memberId] = phases;
+    }
+
+    function stakeBoost(address, uint256, uint256, uint256, uint256) external pure override returns (uint256) {
         return 0;
     }
 
     function unstake(address, uint256) external pure override {}
 
-    function withdraw(address, uint256) external pure override {}
+    function withdraw(address, uint256, uint256) external pure override {}
 
     function mergeStake(address, uint256, uint256) external pure override {}
 }

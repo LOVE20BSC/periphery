@@ -122,10 +122,8 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         _checkPromisedWaitingPhases(params.promisedWaitingPhases);
 
         StakeContext memory context = _stakeContext(params.tokenAddress);
-        IERC20(params.tokenAddress).safeTransferFrom(msg.sender, address(this), params.tokenAmountDesired);
-        IERC20(context.parentTokenAddress).safeTransferFrom(
-            msg.sender, address(this), params.parentTokenAmountDesired
-        );
+        _pullExact(params.tokenAddress, params.tokenAmountDesired);
+        _pullExact(context.parentTokenAddress, params.parentTokenAmountDesired);
 
         HubAmounts memory amounts = _prepareStake(
             context, params.tokenAmountDesired, params.parentTokenAmountDesired, params.deadline
@@ -136,8 +134,8 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             amounts,
             params.promisedWaitingPhases,
             params.memberId,
-            params.tokenAmountMin,
-            params.parentTokenAmountMin
+            params.minLiquidityShares,
+            params.deadline
         );
 
         _refundTokens(context.tokenAddress, context.parentTokenAddress, amounts);
@@ -169,7 +167,7 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         _checkNativeParent(params.tokenAddress);
 
         StakeContext memory context = _stakeContext(params.tokenAddress);
-        IERC20(params.tokenAddress).safeTransferFrom(msg.sender, address(this), params.tokenAmountDesired);
+        _pullExact(params.tokenAddress, params.tokenAmountDesired);
         IWrappedNative(WRAPPED_NATIVE_ADDRESS).deposit{value: msg.value}();
 
         HubAmounts memory amounts =
@@ -180,8 +178,8 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             amounts,
             params.promisedWaitingPhases,
             params.memberId,
-            params.tokenAmountMin,
-            params.parentTokenAmountMin
+            params.minLiquidityShares,
+            params.deadline
         );
 
         _refundNativeThenToken(context.tokenAddress, amounts);
@@ -212,14 +210,14 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         _checkDesiredAmounts(params.amountADesired, params.amountBDesired);
 
         HubPair memory pool = _pairContext(params.tokenA, params.tokenB);
-        IERC20(params.tokenA).safeTransferFrom(msg.sender, address(this), params.amountADesired);
-        IERC20(params.tokenB).safeTransferFrom(msg.sender, address(this), params.amountBDesired);
+        _pullExact(params.tokenA, params.amountADesired);
+        _pullExact(params.tokenB, params.amountBDesired);
 
         HubAmounts memory amounts =
             _prepare(pool, params.amountADesired, params.amountBDesired, params.deadline);
 
         liquidity = _addLiquidity(
-            pool, amounts, params.to, params.deadline, params.amountAMin, params.amountBMin
+            pool, amounts, params.to, params.deadline, params.minLiquidity
         );
 
         _refundTokens(pool.tokenA, pool.tokenB, amounts);
@@ -250,14 +248,14 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         _checkDesiredAmounts(params.amountTokenDesired, msg.value);
 
         HubPair memory pool = _pairContext(params.tokenAddress, WRAPPED_NATIVE_ADDRESS);
-        IERC20(params.tokenAddress).safeTransferFrom(msg.sender, address(this), params.amountTokenDesired);
+        _pullExact(params.tokenAddress, params.amountTokenDesired);
         IWrappedNative(WRAPPED_NATIVE_ADDRESS).deposit{value: msg.value}();
 
         HubAmounts memory amounts =
             _prepare(pool, params.amountTokenDesired, msg.value, params.deadline);
 
         liquidity = _addLiquidity(
-            pool, amounts, params.to, params.deadline, params.amountTokenMin, params.amountNativeMin
+            pool, amounts, params.to, params.deadline, params.minLiquidity
         );
 
         _refundNativeThenToken(pool.tokenA, amounts);
@@ -527,16 +525,21 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         address tokenIn = swapAForB ? tokenA : tokenB;
         address tokenOut = swapAForB ? tokenB : tokenA;
 
+        _swapExact(tokenIn, tokenOut, amountToSwap, deadline);
+    }
+
+    function _swapExact(address tokenIn, address tokenOut, uint256 amountIn, uint256 deadline) private {
         address[] memory path = new address[](2);
         path[0] = tokenIn;
         path[1] = tokenOut;
 
-        _approveToken(tokenIn, address(ROUTER_ADDRESS), amountToSwap);
-        // `amountOutMin = 1` only asserts a non-zero output. Price protection is the caller's endpoint
-        // minimum (`tokenAmountMin` / `amountAMin`), checked after the deposit against what actually
-        // entered; predicting the output here would duplicate the router's arithmetic and still not
-        // stop a sandwich that already moved the pool before this call.
-        ROUTER_ADDRESS.swapExactTokensForTokens(amountToSwap, 1, path, address(this), deadline);
+        _approveToken(tokenIn, address(ROUTER_ADDRESS), amountIn);
+        address pair = IUniswapV2Factory(PAIR_FACTORY_ADDRESS).getPair(tokenIn, tokenOut);
+        uint256 pairBalanceBefore = IERC20(tokenIn).balanceOf(pair);
+        uint256 outputBalanceBefore = IERC20(tokenOut).balanceOf(address(this));
+        uint256[] memory swapped = ROUTER_ADDRESS.swapExactTokensForTokens(amountIn, 1, path, address(this), deadline);
+        _checkReceived(tokenIn, pair, pairBalanceBefore, amountIn);
+        _checkReceived(tokenOut, address(this), outputBalanceBefore, swapped[1]);
         _approveToken(tokenIn, address(ROUTER_ADDRESS), 0);
     }
 
@@ -679,31 +682,13 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
     // staking
     // ---------------------------------------------------------------------------------------------
 
-    function _settle(
-        HubAmounts memory amounts,
-        uint256 amountAMin,
-        uint256 amountBMin,
-        bool staking
-    ) private pure {
-        uint256 enteredA = amounts.preparedAmountA - amounts.remainingAmountA;
-        uint256 enteredB = amounts.preparedAmountB - amounts.remainingAmountB;
-        if (enteredA < amountAMin) {
-            if (staking) revert InsufficientTokenAmount(enteredA, amountAMin);
-            revert InsufficientAmountA(enteredA, amountAMin);
-        }
-        if (enteredB < amountBMin) {
-            if (staking) revert InsufficientParentTokenAmount(enteredB, amountBMin);
-            revert InsufficientAmountB(enteredB, amountBMin);
-        }
-    }
-
     function _stake(
         StakeContext memory context,
         HubAmounts memory amounts,
         uint256 promisedWaitingPhases,
         uint256 memberId,
-        uint256 tokenAmountMin,
-        uint256 parentAmountMin
+        uint256 minLiquidityShares,
+        uint256 deadline
     ) private returns (uint256 govVotesAdded, uint256 liquiditySharesAdded) {
         address stakeAddress = STAKE_ADDRESS;
         _approveToken(context.tokenAddress, stakeAddress, amounts.preparedAmountA);
@@ -714,13 +699,14 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             amounts.preparedAmountA,
             amounts.preparedAmountB,
             promisedWaitingPhases,
-            memberId
+            memberId,
+            deadline
         );
 
         _approveToken(context.tokenAddress, stakeAddress, 0);
         _approveToken(context.parentTokenAddress, stakeAddress, 0);
         _readRemainderStake(context, amounts);
-        _settle(amounts, tokenAmountMin, parentAmountMin, true);
+        if (liquiditySharesAdded < minLiquidityShares) revert InsufficientLiquidityShares(liquiditySharesAdded, minLiquidityShares);
     }
 
     function _addLiquidity(
@@ -728,28 +714,34 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         HubAmounts memory amounts,
         address to,
         uint256 deadline,
-        uint256 amountAMin,
-        uint256 amountBMin
+        uint256 minLiquidity
     ) private returns (uint256 liquidity) {
-        address tokenA = pool.tokenA;
-        address tokenB = pool.tokenB;
         address routerAddress = address(ROUTER_ADDRESS);
-
-        _approveToken(tokenA, routerAddress, amounts.preparedAmountA);
-        _approveToken(tokenB, routerAddress, amounts.preparedAmountB);
-
-        // The pool-level minimums stay at zero. The caller's minimums are endpoint amounts for the whole
-        // chain (`prepared - remaining`), and `_settle` is their single implementation for both paths;
-        // passing them down as `amountAMin`/`amountBMin` would put the same rule in two places and surface
-        // a router-specific revert instead of a Hub error.
-        (,, liquidity) = ROUTER_ADDRESS.addLiquidity(
-            tokenA, tokenB, amounts.preparedAmountA, amounts.preparedAmountB, 0, 0, to, deadline
-        );
-
-        _approveToken(tokenA, routerAddress, 0);
-        _approveToken(tokenB, routerAddress, 0);
+        _approveToken(pool.tokenA, routerAddress, amounts.preparedAmountA);
+        _approveToken(pool.tokenB, routerAddress, amounts.preparedAmountB);
+        liquidity = _mintLiquidity(pool, amounts, to, deadline);
+        if (liquidity < minLiquidity) revert InsufficientLiquidity(liquidity, minLiquidity);
+        _approveToken(pool.tokenA, routerAddress, 0);
+        _approveToken(pool.tokenB, routerAddress, 0);
         _readRemainder(pool, amounts);
-        _settle(amounts, amountAMin, amountBMin, false);
+    }
+
+    function _mintLiquidity(HubPair memory pool, HubAmounts memory amounts, address to, uint256 deadline)
+        private returns (uint256 liquidity)
+    {
+        address pair = _resolvedPairAddress(pool);
+        uint256[2] memory beforeBalances;
+        if (pair != address(0)) {
+            beforeBalances[0] = IERC20(pool.tokenA).balanceOf(pair);
+            beforeBalances[1] = IERC20(pool.tokenB).balanceOf(pair);
+        }
+        (uint256 amountA, uint256 amountB, uint256 minted) = ROUTER_ADDRESS.addLiquidity(
+            pool.tokenA, pool.tokenB, amounts.preparedAmountA, amounts.preparedAmountB, 0, 0, to, deadline
+        );
+        liquidity = minted;
+        pair = _resolvedPairAddress(pool);
+        _checkReceived(pool.tokenA, pair, beforeBalances[0], amountA);
+        _checkReceived(pool.tokenB, pair, beforeBalances[1], amountB);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -776,8 +768,8 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             quote.usableAmountB = amountBDesired;
             quote.expectedLiquidity =
                 Math.sqrt(amountADesired * amountBDesired) - UNISWAP_V2_MINIMUM_LIQUIDITY;
-            quote.suggestedAmountAMin = amountADesired;
-            quote.suggestedAmountBMin = amountBDesired;
+
+
             return quote;
         }
 
@@ -821,8 +813,8 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             _optimalAmounts(reserveAAfter, reserveBAfter, preparedA, preparedB);
         quote.usableAmountA = usableA;
         quote.usableAmountB = usableB;
-        quote.suggestedAmountAMin = usableA;
-        quote.suggestedAmountBMin = usableB;
+
+
 
         uint256 totalSupplyAfterFeeMint = _totalSupplyAfterFeeMint(pool, reserveAAfter, reserveBAfter);
         quote.expectedLiquidity =
@@ -849,8 +841,8 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         quote.usableTokenAmount = lpQuote.usableAmountA;
         quote.usableParentTokenAmount = lpQuote.usableAmountB;
         quote.expectedLiquidity = lpQuote.expectedLiquidity;
-        quote.suggestedTokenAmountMin = lpQuote.suggestedAmountAMin;
-        quote.suggestedParentAmountMin = lpQuote.suggestedAmountBMin;
+
+
 
         (uint256 totalLiquidityShares, , uint256 withdrawableLp, , , , , ) =
             IStake(STAKE_ADDRESS).totalStake(context.tokenAddress);
@@ -893,8 +885,8 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             quote.usableAmountB = parentTokenAmountDesired;
             quote.expectedLiquidity =
                 Math.sqrt(tokenAmountDesired * parentTokenAmountDesired) - UNISWAP_V2_MINIMUM_LIQUIDITY;
-            quote.suggestedAmountAMin = tokenAmountDesired;
-            quote.suggestedAmountBMin = parentTokenAmountDesired;
+
+
             return quote;
         }
         return _quoteLp(pool, tokenAmountDesired, parentTokenAmountDesired);
@@ -909,6 +901,17 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         path[0] = tokenIn;
         path[1] = tokenOut;
         return ROUTER_ADDRESS.getAmountsOut(amountIn, path)[1];
+    }
+
+    function _pullExact(address tokenAddress, uint256 amount) private {
+        uint256 balanceBefore = IERC20(tokenAddress).balanceOf(address(this));
+        IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), amount);
+        _checkReceived(tokenAddress, address(this), balanceBefore, amount);
+    }
+
+    function _checkReceived(address tokenAddress, address recipient, uint256 balanceBefore, uint256 expected) private view {
+        uint256 received = IERC20(tokenAddress).balanceOf(recipient) - balanceBefore;
+        if (received != expected) revert InexactTokenTransfer(tokenAddress, expected, received);
     }
 
     function _approveToken(address tokenAddress, address spender, uint256 amount) private {
@@ -932,6 +935,8 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
 
     function _refundToken(address tokenAddress, uint256 amount) private {
         if (amount == 0) return;
+        uint256 balanceBefore = IERC20(tokenAddress).balanceOf(msg.sender);
         IERC20(tokenAddress).safeTransfer(msg.sender, amount);
+        _checkReceived(tokenAddress, msg.sender, balanceBefore, amount);
     }
 }

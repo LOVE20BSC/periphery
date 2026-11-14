@@ -16,6 +16,16 @@ contract MockERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
+    address public taxedSender;
+    address public taxedRecipient;
+    uint256 public transferFeeBps;
+
+    function setTransferFee(address sender, address recipient, uint256 feeBps) external {
+        taxedSender = sender;
+        taxedRecipient = recipient;
+        transferFeeBps = feeBps;
+    }
+
     uint256 public MAX_SUPPLY = type(uint256).max;
 
     /// @dev The Hub reads the community token's parent through `ILOVE20Token.PARENT_TOKEN_ADDRESS()`, so
@@ -69,7 +79,10 @@ contract MockERC20 {
     function _move(address from, address to, uint256 amount) private {
         require(balanceOf[from] >= amount, "MOCK_BALANCE");
         balanceOf[from] -= amount;
-        balanceOf[to] += amount;
+        uint256 fee = (taxedSender == address(0) || from == taxedSender)
+            && (taxedRecipient == address(0) || to == taxedRecipient) ? amount * transferFeeBps / 10_000 : 0;
+        balanceOf[to] += amount - fee;
+        totalSupply -= fee;
     }
 }
 

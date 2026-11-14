@@ -42,8 +42,7 @@ contract StakeLiquidityTest is HubTestBase {
                 tokenAddress: address(token),
                 tokenAmountDesired: 10_000e18,
                 parentTokenAmountDesired: 0,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp - 1
@@ -61,8 +60,7 @@ contract StakeLiquidityTest is HubTestBase {
                 tokenAddress: address(token),
                 tokenAmountDesired: 10_000e18,
                 parentTokenAmountDesired: 0,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -101,8 +99,7 @@ contract StakeLiquidityTest is HubTestBase {
                 tokenAddress: address(token),
                 tokenAmountDesired: 10_000e18,
                 parentTokenAmountDesired: 1_000e18,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -137,8 +134,7 @@ contract StakeLiquidityTest is HubTestBase {
             StakeLiquidityWithNativeParams({
                 tokenAddress: address(token),
                 tokenAmountDesired: 0,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -178,8 +174,7 @@ contract StakeLiquidityTest is HubTestBase {
                 tokenAddress: address(token),
                 tokenAmountDesired: 10_000e18,
                 parentTokenAmountDesired: 1_000e18,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: quote.liquiditySharesAdded,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -201,8 +196,7 @@ contract StakeLiquidityTest is HubTestBase {
                 tokenAddress: address(token),
                 tokenAmountDesired: 5_000e18,
                 parentTokenAmountDesired: 5_000e18,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -217,8 +211,7 @@ contract StakeLiquidityTest is HubTestBase {
                 tokenAddress: address(token),
                 tokenAmountDesired: 10_000e18,
                 parentTokenAmountDesired: 1_000e18,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -248,8 +241,7 @@ contract StakeLiquidityTest is HubTestBase {
                 tokenAddress: address(token),
                 tokenAmountDesired: 10_000e18,
                 parentTokenAmountDesired: 1_000e18,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: PROMISED_WAITING_PHASES,
                 memberId: MEMBER_ID,
                 deadline: block.timestamp
@@ -260,72 +252,29 @@ contract StakeLiquidityTest is HubTestBase {
         assertEq(quote.govVotesAdded, govVotesAdded, "predicted vote increment");
     }
 
-    function testStakeWithTokenRevertsWhenEnteredBelowTokenMin() public {
+    function testStakeWithTokenRejectsSharesBelowMinimum() public {
         _fundAlice(10_000e18, 0);
-
+        StakeLiquidityQuote memory quote = hub.quoteStakeLiquidity(address(token), 10_000e18, 0, MEMBER_ID, PROMISED_WAITING_PHASES);
         vm.prank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ILOVE20HubErrors.InsufficientTokenAmount.selector,
-                uint256(5_004_945_277_897_729_495_366),
-                type(uint256).max
-            )
-        );
-        hub.stakeLiquidityWithToken(
-            StakeLiquidityWithTokenParams({
-                tokenAddress: address(token),
-                tokenAmountDesired: 10_000e18,
-                parentTokenAmountDesired: 0,
-                tokenAmountMin: type(uint256).max,
-                parentTokenAmountMin: 0,
-                promisedWaitingPhases: PROMISED_WAITING_PHASES,
-                memberId: MEMBER_ID,
-                deadline: block.timestamp
-            })
-        );
+        vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.InsufficientLiquidityShares.selector, quote.liquiditySharesAdded, quote.liquiditySharesAdded + 1));
+        hub.stakeLiquidityWithToken(StakeLiquidityWithTokenParams({
+            tokenAddress: address(token), tokenAmountDesired: 10_000e18, parentTokenAmountDesired: 0,
+            minLiquidityShares: quote.liquiditySharesAdded + 1, promisedWaitingPhases: PROMISED_WAITING_PHASES,
+            memberId: MEMBER_ID, deadline: block.timestamp
+        }));
+        assertEq(token.balanceOf(alice), 10_000e18, "rejected output rolls back input");
     }
 
-    function testStakeWithTokenRevertsWhenEnteredBelowParentMin() public {
-        _fundAlice(10_000e18, 0);
-
-        vm.prank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ILOVE20HubErrors.InsufficientParentTokenAmount.selector,
-                uint256(4_955_391_364_255_177_718_184),
-                type(uint256).max
-            )
-        );
-        hub.stakeLiquidityWithToken(
-            StakeLiquidityWithTokenParams({
-                tokenAddress: address(token),
-                tokenAmountDesired: 10_000e18,
-                parentTokenAmountDesired: 0,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: type(uint256).max,
-                promisedWaitingPhases: PROMISED_WAITING_PHASES,
-                memberId: MEMBER_ID,
-                deadline: block.timestamp
-            })
-        );
-    }
-
-    function testStakeWithNativeRevertsWhenEnteredBelowParentMin() public {
+    function testStakeWithNativeRejectsSharesBelowMinimum() public {
         vm.deal(alice, 10_000e18);
-
+        StakeLiquidityQuote memory quote = hub.quoteStakeLiquidity(address(token), 0, 10_000e18, MEMBER_ID, PROMISED_WAITING_PHASES);
         vm.prank(alice);
-        vm.expectRevert();
-        hub.stakeLiquidityWithNative{value: 10_000e18}(
-            StakeLiquidityWithNativeParams({
-                tokenAddress: address(token),
-                tokenAmountDesired: 0,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: type(uint256).max,
-                promisedWaitingPhases: PROMISED_WAITING_PHASES,
-                memberId: MEMBER_ID,
-                deadline: block.timestamp
-            })
-        );
+        vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.InsufficientLiquidityShares.selector, quote.liquiditySharesAdded, quote.liquiditySharesAdded + 1));
+        hub.stakeLiquidityWithNative{value: 10_000e18}(StakeLiquidityWithNativeParams({
+            tokenAddress: address(token), tokenAmountDesired: 0, minLiquidityShares: quote.liquiditySharesAdded + 1,
+            promisedWaitingPhases: PROMISED_WAITING_PHASES, memberId: MEMBER_ID, deadline: block.timestamp
+        }));
+        assertEq(alice.balance, 10_000e18, "native input rolls back");
     }
 
     // ---------------------------------------------------------------------------------------------

@@ -43,8 +43,7 @@ contract HubFailureTest is HubTestBase {
                 tokenB: address(wbnb),
                 amountADesired: 1_000e18,
                 amountBDesired: 0,
-                amountAMin: 0,
-                amountBMin: 0,
+                minLiquidity: 0,
                 to: alice,
                 deadline: block.timestamp
             })
@@ -140,8 +139,7 @@ contract NativeRefusingCaller {
             StakeLiquidityWithNativeParams({
                 tokenAddress: tokenAddress,
                 tokenAmountDesired: 0,
-                tokenAmountMin: 0,
-                parentTokenAmountMin: 0,
+                minLiquidityShares: 0,
                 promisedWaitingPhases: 3,
                 memberId: memberId,
                 deadline: block.timestamp
@@ -160,8 +158,7 @@ interface LOVE20HubLike {
 struct StakeLiquidityWithNativeParams {
     address tokenAddress;
     uint256 tokenAmountDesired;
-    uint256 tokenAmountMin;
-    uint256 parentTokenAmountMin;
+    uint256 minLiquidityShares;
     uint256 promisedWaitingPhases;
     uint256 memberId;
     uint256 deadline;
