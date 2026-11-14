@@ -690,6 +690,12 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         uint256 minLiquidityShares,
         uint256 deadline
     ) private returns (uint256 govVotesAdded, uint256 liquiditySharesAdded) {
+        {
+            (uint256 shares,, uint256 current,,,,) = IStake(STAKE_ADDRESS).memberStake(context.tokenAddress, memberId);
+            if (shares != 0 && promisedWaitingPhases != current) {
+                revert PromisedWaitingPhasesMismatch(promisedWaitingPhases, current);
+            }
+        }
         address stakeAddress = STAKE_ADDRESS;
         _approveToken(context.tokenAddress, stakeAddress, amounts.preparedAmountA);
         _approveToken(context.parentTokenAddress, stakeAddress, amounts.preparedAmountB);
@@ -853,6 +859,7 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             ? quote.expectedLiquidity
             : (totalLiquidityShares * quote.expectedLiquidity) / withdrawableLp;
         quote.liquidityShares = memberLiquidityShares + quote.liquiditySharesAdded;
+        if (memberLiquidityShares != 0) promisedWaitingPhases = currentPromisedWaitingPhases;
         quote.govVotesAdded = quote.liquidityShares * promisedWaitingPhases
             - memberLiquidityShares * currentPromisedWaitingPhases;
     }

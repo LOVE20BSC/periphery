@@ -252,6 +252,27 @@ contract StakeLiquidityTest is HubTestBase {
         assertEq(quote.govVotesAdded, govVotesAdded, "predicted vote increment");
     }
 
+    function testExistingStakeRequiresSeparateCommitmentIncreaseBeforeTopup() public {
+        _fundAlice(3000e18, 3000e18);
+        StakeLiquidityWithTokenParams memory params = StakeLiquidityWithTokenParams({
+            tokenAddress: address(token), tokenAmountDesired: 1000e18, parentTokenAmountDesired: 1000e18,
+            minLiquidityShares: 0, promisedWaitingPhases: PROMISED_WAITING_PHASES,
+            memberId: MEMBER_ID, deadline: block.timestamp
+        });
+        vm.startPrank(alice);
+        hub.stakeLiquidityWithToken(params);
+        params.promisedWaitingPhases = PROMISED_WAITING_PHASES + 1;
+        vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.PromisedWaitingPhasesMismatch.selector, params.promisedWaitingPhases, PROMISED_WAITING_PHASES));
+        hub.stakeLiquidityWithToken(params);
+        StakeLiquidityQuote memory quote = hub.quoteStakeLiquidity(address(token), 1000e18, 1000e18, MEMBER_ID, PHASES_MIN);
+        StakeLiquidityQuote memory correct = hub.quoteStakeLiquidity(address(token), 1000e18, 1000e18, MEMBER_ID, PROMISED_WAITING_PHASES);
+        assertEq(quote.govVotesAdded, correct.govVotesAdded, "quote uses the existing commitment even with a smaller input");
+        stake.increasePromisedWaitingPhases(address(token), MEMBER_ID, params.promisedWaitingPhases);
+        (uint256 addedVotes, uint256 addedShares) = hub.stakeLiquidityWithToken(params);
+        assertEq(addedVotes, addedShares * params.promisedWaitingPhases, "only the top-up adds votes after the separate change");
+        vm.stopPrank();
+    }
+
     function testStakeWithTokenRejectsSharesBelowMinimum() public {
         _fundAlice(10_000e18, 0);
         StakeLiquidityQuote memory quote = hub.quoteStakeLiquidity(address(token), 10_000e18, 0, MEMBER_ID, PROMISED_WAITING_PHASES);

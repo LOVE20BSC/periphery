@@ -99,6 +99,7 @@ interface ILOVE20HubErrors {
     error InexactTokenTransfer(address tokenAddress, uint256 expected, uint256 received);
     error InsufficientLiquidity(uint256 liquidity, uint256 minLiquidity);
     error InsufficientLiquidityShares(uint256 shares, uint256 minShares);
+    error PromisedWaitingPhasesMismatch(uint256 requested, uint256 current);
     error InvalidPromisedWaitingPhases(
         uint256 value,
         uint256 minPhases,
