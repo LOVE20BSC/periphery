@@ -229,9 +229,10 @@ contract RefundAndRejectionTest is HubTestBase {
         hub.quoteStakeLiquidity(address(lonely), 1e18, 0, MEMBER_ID, PROMISED_WAITING_PHASES);
     }
 
-    /// @dev ...but the LP path accepts it and lets the router create the pair.
-    function testAcceptsMissingPairOnTheLpPath() public {
+    function testAcceptsMissingPairOnTheLpPathDespiteDonation() public {
         MockERC20 lonely = new MockERC20("Lonely", "LON");
+        address futurePair = vm.computeCreateAddress(address(factory), vm.getNonce(address(factory)));
+        lonely.mint(futurePair, 1);
         lonely.mint(alice, 1_000e18);
         wbnb.mint(alice, 1_000e18);
         vm.prank(alice);
@@ -251,6 +252,7 @@ contract RefundAndRejectionTest is HubTestBase {
                 deadline: block.timestamp
             })
         );
-        assertGt(liquidity, 0, "the router created the pair and minted LP");
+        assertEq(factory.getPair(address(lonely), address(wbnb)), futurePair, "predicted pair created");
+        assertGt(liquidity, 0, "LP minted despite donation");
     }
 }

@@ -736,16 +736,16 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         private returns (uint256 liquidity)
     {
         address pair = _resolvedPairAddress(pool);
-        uint256[2] memory beforeBalances;
-        if (pair != address(0)) {
-            beforeBalances[0] = IERC20(pool.tokenA).balanceOf(pair);
-            beforeBalances[1] = IERC20(pool.tokenB).balanceOf(pair);
+        if (pair == address(0)) {
+            pair = IUniswapV2Factory(PAIR_FACTORY_ADDRESS).createPair(pool.tokenA, pool.tokenB);
         }
+        uint256[2] memory beforeBalances;
+        beforeBalances[0] = IERC20(pool.tokenA).balanceOf(pair);
+        beforeBalances[1] = IERC20(pool.tokenB).balanceOf(pair);
         (uint256 amountA, uint256 amountB, uint256 minted) = ROUTER_ADDRESS.addLiquidity(
             pool.tokenA, pool.tokenB, amounts.preparedAmountA, amounts.preparedAmountB, 0, 0, to, deadline
         );
         liquidity = minted;
-        pair = _resolvedPairAddress(pool);
         _checkReceived(pool.tokenA, pair, beforeBalances[0], amountA);
         _checkReceived(pool.tokenB, pair, beforeBalances[1], amountB);
     }
@@ -761,9 +761,7 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
     {
         quote.hasLiquidity = pool.hasLiquidity;
 
-        // No reserves: the whole deposit goes in untouched, so the quote is the input itself. The router
-        // creates the pair when it is missing, so this is the cold-start branch of both "no pair" and
-        // "pair with zero reserves".
+        // No reserves: the whole deposit goes in untouched, so the quote is the input itself.
         if (!pool.hasLiquidity) {
             if (amountADesired == 0 || amountBDesired == 0) {
                 revert PairWithoutLiquidity(pool.tokenA, pool.tokenB);
