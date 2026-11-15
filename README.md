@@ -91,6 +91,8 @@ Pancake 主网是 `8/17`（32%），Pancake 测试网是 `1/3`（25%）。`proto
 
 ### 价格保护
 
+四个写入口在区块时间超过 `deadline` 时回滚 `DeadlineExpired(deadline)`，与 Core 使用同一错误签名；等于截止时间仍允许执行。
+
 `core` 的 `stakeLiquidity` 已删除 `slippage`，只按 Pair 储备把收到的两种币尽可能放进质押，放不下的
 留在调用者手里。Hub 的入参因此只有 `tokenAmountMin` / `parentTokenAmountMin`：
 

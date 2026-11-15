@@ -34,7 +34,7 @@ contract StakeLiquidityTest is HubTestBase {
         vm.prank(alice);
         vm.expectRevert(
             abi.encodeWithSelector(
-                ILOVE20HubErrors.DeadlineExpired.selector, block.timestamp, block.timestamp - 1
+                ILOVE20HubErrors.DeadlineExpired.selector, block.timestamp - 1
             )
         );
         hub.stakeLiquidityWithToken(
@@ -264,11 +264,17 @@ contract StakeLiquidityTest is HubTestBase {
         params.promisedWaitingPhases = PROMISED_WAITING_PHASES + 1;
         vm.expectRevert(abi.encodeWithSelector(ILOVE20HubErrors.PromisedWaitingPhasesMismatch.selector, params.promisedWaitingPhases, PROMISED_WAITING_PHASES));
         hub.stakeLiquidityWithToken(params);
-        StakeLiquidityQuote memory quote = hub.quoteStakeLiquidity(address(token), 1000e18, 1000e18, MEMBER_ID, PHASES_MIN);
-        StakeLiquidityQuote memory correct = hub.quoteStakeLiquidity(address(token), 1000e18, 1000e18, MEMBER_ID, PROMISED_WAITING_PHASES);
-        assertEq(quote.govVotesAdded, correct.govVotesAdded, "quote uses the existing commitment even with a smaller input");
-        stake.increasePromisedWaitingPhases(address(token), MEMBER_ID, params.promisedWaitingPhases);
+        StakeLiquidityQuote memory quote = hub.quoteStakeLiquidity(address(token), 1000e18, 1000e18, MEMBER_ID, params.promisedWaitingPhases);
+        StakeLiquidityQuote memory nativeQuote = hub.quoteStakeLiquidityWithNative(address(token), 1000e18, 1000e18, MEMBER_ID, params.promisedWaitingPhases);
+        assertEq(nativeQuote.govVotesAdded, quote.govVotesAdded, "native quote uses the requested commitment");
+        bytes memory lowerCommitmentError = abi.encodeWithSelector(ILOVE20HubErrors.PromisedWaitingPhasesMismatch.selector, PHASES_MIN, PROMISED_WAITING_PHASES);
+        vm.expectRevert(lowerCommitmentError);
+        hub.quoteStakeLiquidity(address(token), 1000e18, 1000e18, MEMBER_ID, PHASES_MIN);
+        vm.expectRevert(lowerCommitmentError);
+        hub.quoteStakeLiquidityWithNative(address(token), 1000e18, 1000e18, MEMBER_ID, PHASES_MIN);
+        uint256 commitmentVotes = stake.increasePromisedWaitingPhases(address(token), MEMBER_ID, params.promisedWaitingPhases);
         (uint256 addedVotes, uint256 addedShares) = hub.stakeLiquidityWithToken(params);
+        assertEq(quote.govVotesAdded, commitmentVotes + addedVotes, "quote includes commitment increase and top-up");
         assertEq(addedVotes, addedShares * params.promisedWaitingPhases, "only the top-up adds votes after the separate change");
         vm.stopPrank();
     }

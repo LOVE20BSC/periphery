@@ -347,7 +347,7 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
         // A deadline is the caller's own upper bound on when the swap and the deposit may land; shifting
         // it by a validator's timestamp window only re-times the caller's own transaction.
         // forge-lint: disable-next-item(block-timestamp)
-        if (block.timestamp > deadline) revert DeadlineExpired(block.timestamp, deadline);
+        if (block.timestamp > deadline) revert DeadlineExpired(deadline);
     }
 
     function _checkDesiredAmounts(uint256 amountA, uint256 amountB) private pure {
@@ -860,12 +860,14 @@ contract LOVE20Hub is ReentrancyGuard, ILOVE20Hub {
             IStake(STAKE_ADDRESS).totalStake(context.tokenAddress);
         (uint256 memberLiquidityShares, , uint256 currentPromisedWaitingPhases, , , , ) =
             IStake(STAKE_ADDRESS).memberStake(context.tokenAddress, memberId);
+        if (promisedWaitingPhases < currentPromisedWaitingPhases) {
+            revert PromisedWaitingPhasesMismatch(promisedWaitingPhases, currentPromisedWaitingPhases);
+        }
 
         quote.liquiditySharesAdded = totalLiquidityShares == 0 || withdrawableLp == 0
             ? quote.expectedLiquidity
             : (totalLiquidityShares * quote.expectedLiquidity) / withdrawableLp;
         quote.liquidityShares = memberLiquidityShares + quote.liquiditySharesAdded;
-        if (memberLiquidityShares != 0) promisedWaitingPhases = currentPromisedWaitingPhases;
         quote.govVotesAdded = quote.liquidityShares * promisedWaitingPhases
             - memberLiquidityShares * currentPromisedWaitingPhases;
     }

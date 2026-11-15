@@ -87,19 +87,29 @@ interface ILOVE20HubErrors {
         address tokenA,
         address tokenB
     );
-    error DeadlineExpired(
-        uint256 blockTimestamp,
-        uint256 deadline
-    );
+    error DeadlineExpired(uint256 deadline);
     error AmountExceeded(
         uint256 amount,
         uint256 maxAmount
     );
     error ZeroSwapOutput();
-    error InexactTokenTransfer(address tokenAddress, uint256 expected, uint256 received);
-    error InsufficientLiquidity(uint256 liquidity, uint256 minLiquidity);
-    error InsufficientLiquidityShares(uint256 shares, uint256 minShares);
-    error PromisedWaitingPhasesMismatch(uint256 requested, uint256 current);
+    error InexactTokenTransfer(
+        address tokenAddress,
+        uint256 expected,
+        uint256 received
+    );
+    error InsufficientLiquidity(
+        uint256 liquidity,
+        uint256 minLiquidity
+    );
+    error InsufficientLiquidityShares(
+        uint256 shares,
+        uint256 minShares
+    );
+    error PromisedWaitingPhasesMismatch(
+        uint256 requested,
+        uint256 current
+    );
     error InvalidPromisedWaitingPhases(
         uint256 value,
         uint256 minPhases,
