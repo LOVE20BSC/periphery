@@ -129,7 +129,7 @@ def structural():
         ".account.example is committed so a fresh checkout knows the expected keys",
     )
     check(
-        ".account" not in [p.name for p in net.iterdir()],
+        not subprocess.check_output(["git", "ls-files", "--", ".account", "**/.account"], cwd=root).strip(),
         "no real .account is committed (gitignored secret)",
     )
 
@@ -388,6 +388,26 @@ def behavioural():
         check(result.returncode == 0, "31_verify_hub.sh exits 0 for the skip-listed local chain", combined[-800:])
         check("source verification is disabled" in combined, "31_verify_hub.sh reports why it skipped")
         check(SECRET_PASSWORD not in combined, "31_verify_hub.sh never prints the keystore password")
+
+        network = tmp / "script/network/anvil31337_dev"
+        (tmp / "script/network/verifier.params").write_text(
+            "ETHERSCAN_VERIFIER_URL=https://api.etherscan.io/v2/api\nVERIFY_SKIP_CHAIN_IDS=\n")
+        with (network / ".account").open("a") as account:
+            account.write("ETHERSCAN_API_KEY=test-key\nRPC_URL=http://private.invalid\n")
+        result = run_step(tmp, bindir, log, "31_verify_hub.sh")
+        check(result.returncode == 0, "verification reads its key from .account", result.stderr)
+        arguments = (log / "forge.log").read_text()
+        check("http://private.invalid" in arguments, "verification uses the private RPC override")
+        check("test-key" not in arguments, "verification key stays out of process arguments")
+        (network / ".account").write_text("")
+        result = run_step(tmp, bindir, log, "31_verify_hub.sh", {"ETHERSCAN_API_KEY": "inherited-key"})
+        check(result.returncode != 0 and "ETHERSCAN_API_KEY" in result.stderr,
+              "an inherited key cannot replace missing private configuration", result.stderr)
+        (network / ".account").unlink()
+        (tmp / "script/network/verifier.params").write_text(
+            "ETHERSCAN_VERIFIER_URL=https://api.etherscan.io/v2/api\nVERIFY_SKIP_CHAIN_IDS=31337\n")
+        result = run_step(tmp, bindir, log, "31_verify_hub.sh")
+        check(result.returncode == 0, "local verification skips without .account", result.stderr)
 
 
 def main():

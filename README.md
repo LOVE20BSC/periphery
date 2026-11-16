@@ -245,8 +245,8 @@ script/deploy/31_verify_hub.sh <network>          # 开源验证（按 VERIFY_SK
 
 | 文件 | 内容 |
 | --- | --- |
-| `.account` | keystore 账户与密码（**不入库**，模板见 `.account.example`） |
-| `network.params` | `CHAIN_ID`、`RPC_URL`、`ETHERSCAN_API_KEY` |
+| `.account` | keystore 账户、密码、验证 API Key 与私有 RPC（**不入库**，模板见 `.account.example`） |
+| `network.params` | `CHAIN_ID`、公开 `RPC_URL` |
 | `hub.params` | 只有一个可选项 `SWAP_FEE_PROBE_TOKEN`：一个与 WrappedNative 组成**已注资** pair 的代币，部署脚本广播前用它做一次 `getAmountsOut` 反解费率、与 `Stake` 报告的档案交叉校验；留空则跳过（本地链常没有已注资的池子）。**两个费率 key 不在这里**——它们住在 `core.params`，由 `Stake` 拥有 |
 | `addresses.core.params` | 依赖方 `core` 的地址簿（从 `core` 复制） |
 | `addresses.uniswapv2.params` | 依赖方 DEX 的 Router / Factory / WrappedNative（从 `dex` 复制） |
@@ -271,3 +271,5 @@ script/deploy/31_verify_hub.sh <network>          # 开源验证（按 VERIFY_SK
 **在三种真实 DEX profile 下都相等**；报价纯 `view` 不改状态；协议费分支（含「本地区块链不抽成」与
 「Pancake 主网抽成」两侧）；退款形态；事件两个族的根键与三个 indexed 槽；「恰好备齐、无剩余」/
 「比例失衡、有剩余」两类夹具；构造期费率校验与闭式解的溢出边界。
+
+公开参数和地址会随仓库发布到 GitHub Pages。`network.params` 的 `RPC_URL` 只填公开节点；验证 API Key、密码和带凭据的私有 RPC 统一写入已忽略的 `.account`，其中 `RPC_URL` 可覆盖公开节点。部署步骤必需 `.account`；只读校验在它存在时读取；验证步骤仅在实际提交验证时要求其中的 `ETHERSCAN_API_KEY`，不接受环境变量补位。

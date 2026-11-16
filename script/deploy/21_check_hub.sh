@@ -43,6 +43,11 @@ params_unset_all \
     "$NETWORK_DIR/addresses.hub.params"
 
 params_load "$NETWORK_DIR/network.params"
+if [ -f "$NETWORK_DIR/.account" ]; then
+    set -a
+    source "$NETWORK_DIR/.account"
+    set +a
+fi
 params_load "$NETWORK_DIR/addresses.core.params"
 params_load "$NETWORK_DIR/addresses.uniswapv2.params"
 params_load "$NETWORK_DIR/hub.params"

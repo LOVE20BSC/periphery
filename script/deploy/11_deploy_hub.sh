@@ -79,7 +79,6 @@ APPLESCRIPT
 fi
 
 echo "=== Deploying LOVE20Hub to $network ==="
-echo "  RPC_URL: $RPC_URL"
 echo "  CHAIN_ID: $CHAIN_ID"
 
 require_address() {
