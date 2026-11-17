@@ -18,27 +18,27 @@
 
 | 入口 | 资金形态 | 代币对范围 |
 | --- | --- | --- |
-| `stakeLiquidityWithToken` | ERC20 `transferFrom` | 限定：已注册社区币 ↔ 它的 parent |
-| `stakeLiquidityWithNative` | `payable` | 限定 + parent 必须是 WBNB |
+| `stakeLiquidityWithToken` | ERC20 `transferFrom` | 限定：已注册社区代币 ↔ 它的父币 |
+| `stakeLiquidityWithNative` | `payable` | 限定 + 父币必须是 WBNB |
 | `addLiquidityWithToken` | ERC20 `transferFrom` | **不限**任意 `tokenA` / `tokenB` |
 | `addLiquidityWithNative` | `payable` | 不限（另一侧是 WBNB） |
 
 质押两支在组 LP 之上再调一次 `Stake.stakeLiquidity`；组 LP 两支把 LP 直接发给 `to`，不产生质押记账。
-**两条路径的范围不同**：质押限定在社区币上（读 `Launch` / `ILOVE20Token` / `Stake`），组 LP 不读任何
+**两条路径的范围不同**：质押限定在社区代币上（读 `Launch` / `ILOVE20Token` / `Stake`），组 LP 不读任何
 协议合约、pair 由 DEX factory 派生。不把组 LP 拆出去的理由见
 [ADR 2026-11-14](https://github.com/LOVE20BSC/matt-gov/blob/main/docs/adr/2026-11-14-periphery-hub-dual-sided-and-generic-lp.md)。
 
 **报价**四个，纯 `view` 试算：`quoteLp` / `quoteLpWithNative` / `quoteStakeLiquidity` /
 `quoteStakeLiquidityWithNative`。全部返回 `hasLiquidity`（区分首次注资）与 `suggested*Min`；质押报价
 必须带 `memberId` 与 `promisedWaitingPhases`，并额外返回 `liquiditySharesAdded` / `liquidityShares` /
-`govVotesAdded`——流动性质押对外可读的是**份额、治理票与承诺解锁期**，LP 只是 core 的内部记账。
+`govVotesAdded`——对外可读的是**流动性质押份额**、治理票与承诺解锁期；流动性凭证交给 core 的质押合约持有，对外只体现为流动性质押份额。
 
 swap、折算、退款三者的实现在四条写入口之间**共用一份**，数学只存在一处。
 
 ### 空池与缺池
 
 - **pair 不存在**：组 LP 路径接受它——两侧都要 > 0，不 swap，由 Router 的 `_addLiquidity` 内部
-  `createPair`；质押路径仍要求 pair 存在（`Launch._ensurePair` 保证社区币的 pair 必然存在）。
+  `createPair`；质押路径仍要求 pair 存在（`Launch._ensurePair` 保证社区代币的 pair 必然存在）。
 - **pair 存在但储备为 0**：两条路径都接受首次注资（两侧都要 > 0），不 swap，LP 为
   `sqrt(a·b) − 1000`。这正是新币冷启动的场景：`Launch` 建 token 时就 `createPair` 但从不注资。
 - **只有一侧 > 0 且无储备**：`PairWithoutLiquidity`，因为没有价格可以定价 swap。
@@ -89,24 +89,24 @@ feeLp = supply · (rootK − rootKLast) · k / (a·rootK + k·rootKLast)
 其中 `k/a` 就是两个费率之比（`lp` 与 `proto` 约分后）。Uniswap V2 是 `1/5`（增长量的 1/6），
 Pancake 主网是 `8/17`（32%），Pancake 测试网是 `1/3`（25%）。`proto == 0` 时整段是 no-op。
 
-### 价格保护
+### 滑点容忍度（最少到账）与截止时间
 
 四个写入口在区块时间超过 `deadline` 时回滚 `DeadlineExpired(deadline)`，与 Core 使用同一错误签名；等于截止时间仍允许执行。
 
 `core` 的 `stakeLiquidity` 已删除 `slippage`，只按 Pair 储备把收到的两种币尽可能放进质押，放不下的
 留在调用者手里。Hub 的入参因此只有 `tokenAmountMin` / `parentTokenAmountMin`：
 
-- 语义是**全链路终点**——「最终至少有多少社区币 / 父币进入质押（或进入 LP）」，不是 swap 段的
+- 语义是**全链路终点**——「最终至少有多少社区代币 / 父币进入质押（或进入 LP）」，不是 swap 段的
   `amountOutMin`；
 - 校验方式是 Hub 调 `core` **之后**以自身余额差取 `prepared − remaining`，与 Min 比较；
 - **不在 Hub 里复刻 core 的折算公式**：core 扣掉多少完全由它自己决定，Hub 只观测余额变化。
 
 **没有 swap 段的内部输出界**（旧版的 `SWAP_OUTPUT_TOLERANCE_RATIO` 已删除）。原因是它给的是假保护：
 Hub 自己的 `_amountOut` 与 Router 的 `getAmountOut` 是逐项相同的整数公式、读的是同一个 pair，而同一笔
-内储备不会在「读储备」与「swap」之间移动（社区币与 WBNB 都是无钩子 ERC20），所以那个 99% 的下界恒被
+内储备不会在「读储备」与「swap」之间移动（社区代币与 WBNB 都是无钩子 ERC20），所以那个 99% 的下界恒被
 满足；夹子发生在交易**之前**，Hub 读到的已经是被人推过的储备，按那组储备算出的 99% 自然还是过。
 
-现在 `amountOutMin` 传 `1`，唯一作用是「Router 不得返回 0」；真正的价格保护是调用者的终点 Min。报价
+现在 `amountOutMin` 传 `1`，唯一作用是「Router 不得返回 0」；真正决定最少到账的是调用者传入的终点 Min。报价
 里的输出量一律取 Router 的真实返回（`getAmountsOut`），Hub 不自己预测，这样报价与写入逐 wei 相等。
 
 ### `AmountExceeded` 不是溢出保护
@@ -156,13 +156,13 @@ Hub 自己的 `_amountOut` 与 Router 的 `getAmountOut` 是逐项相同的整�
 
 | 族 | 根键 | 事件 | 三个 indexed 槽 |
 | --- | --- | --- | --- |
-| `periphery.hub` | 社区币 | `HubLiquidityStakedWithToken` / `...WithNative` | `tokenAddress` / `memberId` / `caller` |
+| `periphery.hub` | 社区代币 | `HubLiquidityStakedWithToken` / `...WithNative` | `tokenAddress` / `memberId` / `caller` |
 | `periphery.pair` | pair | `HubLiquidityAddedWithToken` / `...WithNative` | `pairAddress` / `to` / `caller` |
 
 若合并成一族（根键「`tokenAddress` 或 `pairAddress`」），`check-events.py` 只能校验「首字段是这两个
 之一」，一条质押事件写错成 `pairAddress` 也能通过——约束就降级成人眼约定。
 
-组 LP 事实里既没有「社区币」也没有「parent」角色，所以它的四个金额字段是 `preparedAmountA` /
+组 LP 事实里既没有「社区代币」也没有「父币」角色，所以它的四个金额字段是 `preparedAmountA` /
 `preparedAmountB` / `remainingAmountA` / `remainingAmountB`；质押事实保持 `preparedTokenAmount` 等。
 
 `pairAddress` 在 pair 尚不存在时（组 LP 冷启动、由 Router 建池）于 `addLiquidity` 返回后回读一次。
